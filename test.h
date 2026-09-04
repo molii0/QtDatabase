@@ -136,45 +136,17 @@ static void demoStationManage(DBManager &db)
     qInfo().noquote() << QStringLiteral("清空桩后删除电站:") << (delStationOk ? "成功" : QStringLiteral("失败: %1").arg(err));
 }
 
-// 订单流程演示(状态机): 选桩下单[待支付/已连接] -> 取消 与 结算种子订单[充电中]
+// 订单流程演示(状态机 + BR-02): 结算种子充电订单 -> 下单[待支付] -> 重复下单被拒 -> 取消
 static void demoOrderFlow(DBManager &db)
 {
     qInfo() << "\n--- 订单流程(orderConnect/orderStart/orderCancel/orderFinish) ---";
 
-    // A. 用户"测试用户"选一台空闲桩下单 -> 订单[待支付], 电桩[已连接]
     DBManager::User u;
     if (!db.getUserByPhone(QStringLiteral("12345678910"), &u))
         return;
-    DBManager::Charger idle;
-    const QVector<DBManager::Charger> all = db.listChargers();
-    for (const DBManager::Charger &c : all) {
-        if (c.status == ChargerIdle) { idle = c; break; }
-    }
-    if (idle.chargerId == 0) {
-        qWarning() << "没有空闲桩, 跳过演示";
-        return;
-    }
 
-    QString err;
-    qint64 orderId = 0;
-    const bool okConnect = db.orderConnect(u.userId, idle.chargerId, &orderId, &err);
-    qInfo().noquote() << QStringLiteral("选桩下单(%1):").arg(idle.code) << (okConnect ? "成功" : "失败: " + err);
-    if (okConnect) {
-        DBManager::Order o;
-        db.getOrderById(orderId, &o);
-        qInfo().noquote() << QStringLiteral("  订单状态: %1").arg(orderStateText(o.status));
-
-        // 非法转换演示: 还没开始充电就"结算" -> 应被状态机拒绝
-        QString err2;
-        const bool bad = db.orderFinish(orderId, &err2);
-        qInfo().noquote() << QStringLiteral("  未充电直接结算:") << (bad ? "成功(异常)" : QStringLiteral("被拒绝(正确): %1").arg(err2));
-
-        // 取消: 订单[待支付->已取消], 电桩[已连接->空闲]
-        const bool okCancel = db.orderCancel(orderId, &err2);
-        qInfo().noquote() << QStringLiteral("  取消订单:") << (okCancel ? "成功, 电桩已释放为空闲" : "失败: " + err2);
-    }
-
-    // B. 结算种子里的"充电中"订单(15 分钟前开始, 有真实时长可算钱)
+    // B. 先结算种子里的"充电中"订单(15 分钟前开始, 有真实时长可算钱),
+    //    结算后用户才有"未结算订单=无"的状态, 便于演示下一步下单
     {
         const QVector<DBManager::Order> mine = db.listOrders(u.userId);
         bool foundCharging = false;
@@ -199,6 +171,41 @@ static void demoOrderFlow(DBManager &db)
         }
         if (!foundCharging)
             qInfo().noquote() << QStringLiteral("没有充电中的种子订单可结算(可能上回已结算)");
+    }
+
+    // A. 用户"测试用户"选一台空闲桩下单 -> 订单[待支付], 电桩[已连接]
+    DBManager::Charger idle;
+    const QVector<DBManager::Charger> all = db.listChargers();
+    for (const DBManager::Charger &c : all) {
+        if (c.status == ChargerIdle) { idle = c; break; }
+    }
+    if (idle.chargerId == 0) {
+        qWarning() << "没有空闲桩, 跳过下单演示";
+        return;
+    }
+
+    QString err;
+    qint64 orderId = 0;
+    const bool okConnect = db.orderConnect(u.userId, idle.chargerId, &orderId, &err);
+    qInfo().noquote() << QStringLiteral("选桩下单(%1):").arg(idle.code) << (okConnect ? "成功" : "失败: " + err);
+    if (okConnect) {
+        DBManager::Order o;
+        db.getOrderById(orderId, &o);
+        qInfo().noquote() << QStringLiteral("  订单状态: %1").arg(orderStateText(o.status));
+
+        // BR-02: 同一用户已有未结算订单时, 再下单会被拒绝
+        QString errBr;
+        const bool dup = db.orderConnect(u.userId, idle.chargerId, nullptr, &errBr);
+        qInfo().noquote() << QStringLiteral("  未结算时重复下单:") << (dup ? "成功(异常)" : QStringLiteral("被拒绝(正确): %1").arg(errBr));
+
+        // 非法转换演示: 还没开始充电就"结算" -> 应被状态机拒绝
+        QString err2;
+        const bool bad = db.orderFinish(orderId, &err2);
+        qInfo().noquote() << QStringLiteral("  未充电直接结算:") << (bad ? "成功(异常)" : QStringLiteral("被拒绝(正确): %1").arg(err2));
+
+        // 取消: 订单[待支付->已取消], 电桩[已连接->空闲]
+        const bool okCancel = db.orderCancel(orderId, &err2);
+        qInfo().noquote() << QStringLiteral("  取消订单:") << (okCancel ? "成功, 电桩已释放为空闲" : "失败: " + err2);
     }
 }
 

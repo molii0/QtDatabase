@@ -187,7 +187,8 @@ private:
     static QString nowStr();    // 当前本地时间 "yyyy-MM-dd HH:mm:ss"
     static double round2(double v);   // 金额/电量保留 2 位小数
 
-    static constexpr int kSchemaVersion = 2;    // 当前数据库结构版本
+    static constexpr int kSchemaVersion = 3;    // 当前数据库结构版本
+    // v3: BR-02/03 部分唯一索引 + 补齐 ops_log/load_prediction/recharge_log 三张表
 
     QString m_dbPath;
     mutable QMutex m_openMutex; // 保护"每个线程首次建连接"的并发

@@ -151,6 +151,13 @@ bool DBManager::orderConnect(qint64 userId, qint64 chargerId, qint64 *newOrderId
     if (q.value(0).toInt() == 0)
         return rollbackAndFail(QStringLiteral("账号已被冻结，不能下单充电"));
 
+    // BR-02: 同一用户已有未结算订单(待支付0/充电中1)时不允许再下单
+    q.prepare(QStringLiteral(
+        "SELECT order_id FROM charging_order WHERE user_id = :id AND status IN (0, 1) LIMIT 1;"));
+    q.bindValue(QStringLiteral(":id"), userId);
+    if (q.exec() && q.next())
+        return rollbackAndFail(QStringLiteral("您有未完成的充电订单，请先结算或取消后再下单"));
+
     // 电桩校验(存在 / 空闲)
     q.prepare(QStringLiteral("SELECT station_id, status, code FROM charger WHERE charger_id = :id;"));
     q.bindValue(QStringLiteral(":id"), chargerId);
@@ -171,8 +178,13 @@ bool DBManager::orderConnect(qint64 userId, qint64 chargerId, qint64 *newOrderId
     q.bindValue(QStringLiteral(":uid"), userId);
     q.bindValue(QStringLiteral(":sid"), stationId);
     q.bindValue(QStringLiteral(":cid"), chargerId);
-    if (!q.exec())
-        return rollbackAndFail(QStringLiteral("创建订单失败: %1").arg(q.lastError().text()));
+    if (!q.exec()) {
+        // 数据库级 BR-02/BR-03 唯一索引兜底(并发抢单时的最后防线)
+        const QString msg = q.lastError().text();
+        if (msg.contains(QStringLiteral("uq_order_")))
+            return rollbackAndFail(QStringLiteral("操作冲突：您有未完成订单或该电桩已被占用，请刷新后重试"));
+        return rollbackAndFail(QStringLiteral("创建订单失败: %1").arg(msg));
+    }
     const qint64 orderId = q.lastInsertId().toLongLong();
 
     // 电桩 空闲 -> 已连接

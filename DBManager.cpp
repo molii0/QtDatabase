@@ -66,8 +66,6 @@ bool DBManager::init(const QString &dbFilePath)
 
     if (!createTables())
         return false;
-    if (!createIndexes())
-        return false;
 
     if (freshFile) {
         // 全新文件: 上面建的就是最新结构, 直接登记版本号
@@ -77,6 +75,7 @@ bool DBManager::init(const QString &dbFilePath)
         }
     } else {
         // 已有文件: 读出结构版本号, 把没执行过的增量迁移按顺序执行一遍
+        // (迁移必须跑在建索引之前: BR-02/03 唯一索引要求先清理历史重复订单)
         int version = 0;
         readSchemaVersion(&version);
         QString migErr;
@@ -85,6 +84,9 @@ bool DBManager::init(const QString &dbFilePath)
             return false;
         }
     }
+
+    if (!createIndexes())
+        return false;
 
     // 空库(没有任何电站)才写演示数据, 已存在的库不重复写
     QSqlQuery q(dbc);
@@ -224,6 +226,39 @@ bool DBManager::createTables()
                 created_at TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
             );
         )"),
+        // 运维日志表(UC-A-05: 远程重启/标记故障/恢复正常等记录)
+        QStringLiteral(R"(
+            CREATE TABLE IF NOT EXISTS ops_log (
+                log_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_account TEXT NOT NULL DEFAULT '',
+                charger_id    INTEGER REFERENCES charger(charger_id),
+                charger_code  TEXT NOT NULL DEFAULT '',
+                action        TEXT NOT NULL,
+                detail        TEXT NOT NULL DEFAULT '',
+                created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+        )"),
+        // 充值流水表(UC-U-05: 每次充值记一条)
+        QStringLiteral(R"(
+            CREATE TABLE IF NOT EXISTS recharge_log (
+                recharge_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL REFERENCES user(user_id),
+                amount      REAL NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+        )"),
+        // 负荷预测表(UC-A-08/UC-M-03: 机器学习结果回写)
+        QStringLiteral(R"(
+            CREATE TABLE IF NOT EXISTS load_prediction (
+                prediction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                station_id    INTEGER NOT NULL REFERENCES station(station_id),
+                generated_at  TEXT NOT NULL,
+                target_time   TEXT NOT NULL,
+                load_kwh      REAL NOT NULL DEFAULT 0,
+                idle_count    INTEGER NOT NULL DEFAULT 0,
+                is_peak       INTEGER NOT NULL DEFAULT 0
+            );
+        )"),
     };
 
     QSqlQuery q(db());
@@ -252,6 +287,18 @@ bool DBManager::createIndexes()
         "CREATE INDEX IF NOT EXISTS idx_order_status ON charging_order (status);",
         // 某电桩是否被订单占用 / 电桩使用记录
         "CREATE INDEX IF NOT EXISTS idx_order_charger ON charging_order (charger_id);",
+
+        // ---- BR-02/BR-03 数据库级约束: 部分唯一索引 ----
+        // 同一用户同时最多 1 个未结算订单(待支付0/充电中1)
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_order_user_active"
+        " ON charging_order (user_id) WHERE status IN (0, 1);",
+        // 同一电桩同时最多被 1 个订单占用
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_order_charger_active"
+        " ON charging_order (charger_id) WHERE status IN (0, 1);",
+
+        // 新表配套索引
+        "CREATE INDEX IF NOT EXISTS idx_recharge_user ON recharge_log (user_id);",
+        "CREATE INDEX IF NOT EXISTS idx_pred_station ON load_prediction (station_id);",
     };
 
     QSqlQuery q(db());
@@ -329,7 +376,7 @@ bool DBManager::applyMigrations(int fromVersion, QString *err)
             rollbackTransaction();
             return fail(QStringLiteral("迁移1: 提交失败"));
         }
-        qDebug() << "数据库迁移 1/2 完成(station.code_prefix)。";
+        qDebug() << "数据库迁移 1 完成(station.code_prefix 补列并回填)。";
         fromVersion = 1;
     }
 
@@ -349,11 +396,49 @@ bool DBManager::applyMigrations(int fromVersion, QString *err)
             rollbackTransaction();
             return fail(QStringLiteral("迁移2: 提交失败"));
         }
-        qDebug() << "数据库迁移 2/2 完成(电桩新状态: 0空闲 1已连接 2充电中 3故障)。";
+        qDebug() << "数据库迁移 2 完成(电桩状态: 0空闲 1已连接 2充电中 3故障)。";
         fromVersion = 2;
     }
 
-    // 以后新迁移照此继续加: if (fromVersion < 3) {...}
+    // 迁移 3: 为 BR-02/BR-03 部分唯一索引做数据清理。
+    // 旧版没有约束, 可能出现过"同一用户/同一电桩有多条未结算订单", 先取消旧的只留最新,
+    // 并释放已经没有任何活动订单的电桩, 否则建唯一索引会失败。
+    if (fromVersion < 3) {
+        if (!beginTransaction())
+            return fail(QStringLiteral("迁移3: 开启事务失败"));
+        QSqlQuery q(db());
+        // 同一用户保留最新一条活动订单, 其余置已取消
+        q.exec(QStringLiteral(
+            "UPDATE charging_order SET status = 3 WHERE order_id IN ("
+            "  SELECT o.order_id FROM charging_order o"
+            "   WHERE o.status IN (0,1) AND EXISTS ("
+            "     SELECT 1 FROM charging_order o2"
+            "      WHERE o2.user_id = o.user_id AND o2.status IN (0,1) AND o2.order_id > o.order_id))"));
+        // 同一电桩保留最新一条活动订单, 其余置已取消
+        q.exec(QStringLiteral(
+            "UPDATE charging_order SET status = 3 WHERE order_id IN ("
+            "  SELECT o.order_id FROM charging_order o"
+            "   WHERE o.status IN (0,1) AND EXISTS ("
+            "     SELECT 1 FROM charging_order o2"
+            "      WHERE o2.charger_id = o.charger_id AND o2.status IN (0,1) AND o2.order_id > o.order_id))"));
+        // 释放那些已经没有任何活动订单、但仍显示占用中的电桩
+        q.exec(QStringLiteral(
+            "UPDATE charger SET status = 0 WHERE charger_id NOT IN ("
+            "  SELECT charger_id FROM charging_order WHERE status IN (0,1))"
+            "  AND status IN (1,2);"));
+        if (q.lastError().isValid()) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移3: 清理重复订单失败: %1").arg(q.lastError().text()));
+        }
+        if (!writeSchemaVersion(3) || !commitTransaction()) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移3: 提交失败"));
+        }
+        qDebug() << "数据库迁移 3/3 完成(BR-02/03 唯一索引前清理)。";
+        fromVersion = 3;
+    }
+
+    // 以后新迁移照此继续加: if (fromVersion < 4) {...}
     return true;
 }
 
