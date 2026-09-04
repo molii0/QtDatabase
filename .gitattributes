@@ -1,0 +1,5 @@
+# 统一换行符为 LF，避免 Windows / Ubuntu 之间出现整文件"改动"假象
+* text=auto eol=lf
+
+# Windows 批处理保留 CRLF
+*.bat text eol=crlf
