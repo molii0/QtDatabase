@@ -358,3 +358,63 @@ bool DBManager::adminRecover(qint64 chargerId, QString *err)
     }
     return true;
 }
+
+// ------------------------- 运维日志(ops_log) -------------------------
+
+bool DBManager::addOpsLog(const QString &adminAccount, qint64 chargerId,
+                          const QString &chargerCode, const QString &action,
+                          const QString &detail)
+{
+    // detail 可省略; 省略时存"非 NULL 的空串"(避免触发表上的 NOT NULL)
+    const QString detailText = detail.isNull() ? QStringLiteral("") : detail;
+    QSqlQuery q(db());
+    q.prepare(QStringLiteral(
+        "INSERT INTO ops_log (admin_account, charger_id, charger_code, action, detail)"
+        " VALUES (:aa, :cid, :cc, :ac, :dt);"));
+    q.bindValue(QStringLiteral(":aa"), adminAccount);
+    q.bindValue(QStringLiteral(":cid"), chargerId);
+    q.bindValue(QStringLiteral(":cc"), chargerCode);
+    q.bindValue(QStringLiteral(":ac"), action);
+    q.bindValue(QStringLiteral(":dt"), detailText);
+    if (!q.exec()) {
+        qDebug() << "写入运维日志失败:" << q.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+bool DBManager::listOpsLogs(int limit, QVector<OpsLog> *out, QString *err) const
+{
+    if (!out) {
+        if (err) *err = QStringLiteral("listOpsLogs: 输出参数为空");
+        return false;
+    }
+    out->clear();
+    QSqlQuery q(db());
+    if (limit < 0) {
+        q.prepare(QStringLiteral(
+            "SELECT log_id, admin_account, charger_id, charger_code, action, detail, created_at"
+            " FROM ops_log ORDER BY log_id DESC;"));
+    } else {
+        q.prepare(QStringLiteral(
+            "SELECT log_id, admin_account, charger_id, charger_code, action, detail, created_at"
+            " FROM ops_log ORDER BY log_id DESC LIMIT :lim;"));
+        q.bindValue(QStringLiteral(":lim"), limit);
+    }
+    if (!q.exec()) {
+        if (err) *err = QStringLiteral("查询运维日志失败: %1").arg(q.lastError().text());
+        return false;
+    }
+    while (q.next()) {
+        OpsLog o;
+        o.logId = q.value(0).toLongLong();
+        o.adminAccount = q.value(1).toString();
+        o.chargerId = q.value(2).toLongLong();
+        o.chargerCode = q.value(3).toString();
+        o.action = q.value(4).toString();
+        o.detail = q.value(5).toString();
+        o.createdAt = q.value(6).toString();
+        out->append(o);
+    }
+    return true;
+}

@@ -117,6 +117,8 @@ bool ApiServer::start(quint16 port)
                   });
     m_httpServer->route("/api/admin/orders", QHttpServerRequest::Method::Get,
                   [this](const QHttpServerRequest &req) { return onAdminListOrders(req); });
+    m_httpServer->route("/api/admin/logs", QHttpServerRequest::Method::Get,
+                  [this](const QHttpServerRequest &req) { return onAdminOpsLogs(req); });
 
     // 注册成功后再真正开始监听
     if (!m_httpServer->bind(tcp)) {

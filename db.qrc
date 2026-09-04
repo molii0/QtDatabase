@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/db">
+        <file alias="schema.sql">db/schema.sql</file>
+        <file alias="indexes.sql">db/indexes.sql</file>
+        <file alias="migrations/001_station_code_prefix.sql">db/migrations/001_station_code_prefix.sql</file>
+        <file alias="migrations/002_charger_status_remap.sql">db/migrations/002_charger_status_remap.sql</file>
+        <file alias="migrations/003_clean_duplicate_orders.sql">db/migrations/003_clean_duplicate_orders.sql</file>
+    </qresource>
+</RCC>

@@ -110,10 +110,16 @@
 `PUT /api/admin/chargers/{chargerId}/action`　body:`{"action":"fault"|"recover"|"restart"}`
 → `200 {"chargerId","status","statusText"}`
 注意：只能对“空闲”桩标记故障；恢复只能对“故障”桩。非法转换返回 409。
+**每次成功都会自动写入一条运维日志(ops_log)，记录操作账号与动作。**
 
 ### 22. 管理端订单列表
 `GET /api/admin/orders?userId=1&status=2`（参数都可选）
 → `200 {"orders":[...]}`
+
+### 23. 运维日志列表
+`GET /api/admin/logs?limit=50`（最近 limit 条，倒序）
+→ `200 {"logs":[{logId,adminAccount,chargerId,chargerCode,action,detail,createdAt}]}`
+来源：管理端对电桩的“标记故障/恢复/远程重启”等操作会自动落库。
 
 ---
 

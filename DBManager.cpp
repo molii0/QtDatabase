@@ -1,8 +1,10 @@
 #include "DBManager.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -12,13 +14,49 @@
 #include <cmath>
 
 // ============================================================================
-// DBManager 核心部分: 连接管理 / 建表 / 索引 / 初始化
-// (用户、电站桩、订单的实现分别在 DBManager_user/station/order.cpp,
-//  演示数据在 DBManager_seed.cpp)
+// DBManager 核心部分: 连接管理 / 建表 / 索引 / 版本迁移 / 初始化
+// 建表 SQL 与增量迁移脚本都不再内联在代码里, 而是 db/*.sql 文件,
+// 经 Qt 资源(db.qrc)编译进程序, 运行时从 ":/db/..." 读取执行。
 // ============================================================================
 
 namespace {
+
 const QString kDefaultDbName = QStringLiteral("charge_platform.db");
+
+// 读取一个 SQL 资源文件并逐条执行(每条以 ';' 结尾; 去掉整行 '--' 注释)
+bool execResource(QSqlQuery &q, const QString &resPath, QString *err)
+{
+    QFile f(resPath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (err) *err = QStringLiteral("读取 SQL 资源失败: %1").arg(resPath);
+        return false;
+    }
+    const QString text = QString::fromUtf8(f.readAll());
+
+    QStringList statements;
+    for (const QString &chunk : text.split(QLatin1Char(';'))) {
+        QString cleaned;
+        const QStringList lines = chunk.split(QLatin1Char('\n'));
+        for (const QString &line : lines) {
+            if (line.trimmed().startsWith(QStringLiteral("--")))
+                continue;               // 去掉注释行
+            cleaned += line + QLatin1Char('\n');
+        }
+        cleaned = cleaned.trimmed();
+        if (!cleaned.isEmpty())
+            statements.append(cleaned);
+    }
+
+    for (const QString &stmt : statements) {
+        if (!q.exec(stmt)) {
+            if (err) *err = QStringLiteral("SQL 执行失败(%1): %2")
+                                 .arg(resPath, q.lastError().text());
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 // ------------------------- 单例与生命周期 -------------------------
@@ -156,157 +194,26 @@ bool DBManager::rollbackTransaction(){ return db().rollback(); }
 
 // ------------------------- 建表与索引 -------------------------
 
+// 建全部表(内容来自资源 db/schema.sql, 全部 IF NOT EXISTS)
 bool DBManager::createTables()
 {
-    const QStringList sqls = {
-        // 结构版本表(数据库维护机制: 记录当前结构版本号, 启动时按版本补迁移)
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS schema_version (
-                version    INTEGER PRIMARY KEY,
-                applied_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-        )"),
-        // 用户表
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS user (
-                user_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone         TEXT    NOT NULL UNIQUE,
-                nickname      TEXT    NOT NULL,
-                balance       REAL    NOT NULL DEFAULT 0,
-                status        INTEGER NOT NULL DEFAULT 1,
-                register_time TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-        )"),
-        // 管理员表
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS admin (
-                admin_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-                account    TEXT NOT NULL UNIQUE,
-                password   TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-        )"),
-        // 充电站表
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS station (
-                station_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                name        TEXT NOT NULL,
-                code_prefix TEXT NOT NULL DEFAULT '',
-                address     TEXT NOT NULL DEFAULT '',
-                longitude   REAL NOT NULL,
-                latitude    REAL NOT NULL,
-                price       REAL NOT NULL DEFAULT 0
-            );
-        )"),
-        // 充电桩表(status 见 ChargeState.h: 0空闲 1已连接 2充电中 3故障)
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS charger (
-                charger_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                station_id INTEGER NOT NULL REFERENCES station(station_id),
-                code       TEXT    NOT NULL,
-                type       INTEGER NOT NULL DEFAULT 0,
-                power      REAL    NOT NULL,
-                status     INTEGER NOT NULL DEFAULT 0,
-                UNIQUE (station_id, code)
-            );
-        )"),
-        // 订单表(status 见 ChargeState.h: 0待支付 1充电中 2已完成 3已取消)
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS charging_order (
-                order_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_no   TEXT NOT NULL UNIQUE,
-                user_id    INTEGER NOT NULL REFERENCES user(user_id),
-                station_id INTEGER NOT NULL REFERENCES station(station_id),
-                charger_id INTEGER NOT NULL REFERENCES charger(charger_id),
-                status     INTEGER NOT NULL DEFAULT 0,
-                energy     REAL    NOT NULL DEFAULT 0,
-                amount     REAL    NOT NULL DEFAULT 0,
-                start_time TEXT,
-                end_time   TEXT,
-                created_at TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-        )"),
-        // 运维日志表(UC-A-05: 远程重启/标记故障/恢复正常等记录)
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS ops_log (
-                log_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                admin_account TEXT NOT NULL DEFAULT '',
-                charger_id    INTEGER REFERENCES charger(charger_id),
-                charger_code  TEXT NOT NULL DEFAULT '',
-                action        TEXT NOT NULL,
-                detail        TEXT NOT NULL DEFAULT '',
-                created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-        )"),
-        // 充值流水表(UC-U-05: 每次充值记一条)
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS recharge_log (
-                recharge_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id     INTEGER NOT NULL REFERENCES user(user_id),
-                amount      REAL NOT NULL,
-                created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            );
-        )"),
-        // 负荷预测表(UC-A-08/UC-M-03: 机器学习结果回写)
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS load_prediction (
-                prediction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                station_id    INTEGER NOT NULL REFERENCES station(station_id),
-                generated_at  TEXT NOT NULL,
-                target_time   TEXT NOT NULL,
-                load_kwh      REAL NOT NULL DEFAULT 0,
-                idle_count    INTEGER NOT NULL DEFAULT 0,
-                is_peak       INTEGER NOT NULL DEFAULT 0
-            );
-        )"),
-    };
-
+    QString err;
     QSqlQuery q(db());
-    for (const QString &sql : sqls) {
-        if (!q.exec(sql)) {
-            qCritical() << "建表失败:" << q.lastError().text() << "\nSQL:" << sql;
-            return false;
-        }
+    if (!execResource(q, QStringLiteral(":/db/schema.sql"), &err)) {
+        qCritical() << "建表失败:" << err;
+        return false;
     }
     return true;
 }
 
+// 建索引(内容来自资源 db/indexes.sql, 每次启动执行, 全部 IF NOT EXISTS)
 bool DBManager::createIndexes()
 {
-    // 检索加速索引(IF NOT EXISTS: 旧库补建也不会重复)
-    const QStringList sqls = {
-        // 电站下的电桩列表查询: WHERE station_id = ?
-        "CREATE INDEX IF NOT EXISTS idx_charger_station ON charger (station_id);",
-        // 电桩按状态过滤(电站列表"空闲数"统计)
-        "CREATE INDEX IF NOT EXISTS idx_charger_status ON charger (status);",
-        // 某用户的订单历史: WHERE user_id = ?
-        "CREATE INDEX IF NOT EXISTS idx_order_user ON charging_order (user_id);",
-        // 查"某用户未结算订单"(预约0/充电中1) —— 联合索引
-        "CREATE INDEX IF NOT EXISTS idx_order_user_status ON charging_order (user_id, status);",
-        // 按订单状态筛选(管理端订单页)
-        "CREATE INDEX IF NOT EXISTS idx_order_status ON charging_order (status);",
-        // 某电桩是否被订单占用 / 电桩使用记录
-        "CREATE INDEX IF NOT EXISTS idx_order_charger ON charging_order (charger_id);",
-
-        // ---- BR-02/BR-03 数据库级约束: 部分唯一索引 ----
-        // 同一用户同时最多 1 个未结算订单(待支付0/充电中1)
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_order_user_active"
-        " ON charging_order (user_id) WHERE status IN (0, 1);",
-        // 同一电桩同时最多被 1 个订单占用
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_order_charger_active"
-        " ON charging_order (charger_id) WHERE status IN (0, 1);",
-
-        // 新表配套索引
-        "CREATE INDEX IF NOT EXISTS idx_recharge_user ON recharge_log (user_id);",
-        "CREATE INDEX IF NOT EXISTS idx_pred_station ON load_prediction (station_id);",
-    };
-
+    QString err;
     QSqlQuery q(db());
-    for (const QString &sql : sqls) {
-        if (!q.exec(sql)) {
-            qCritical() << "建索引失败:" << q.lastError().text() << "\nSQL:" << sql;
-            return false;
-        }
+    if (!execResource(q, QStringLiteral(":/db/indexes.sql"), &err)) {
+        qCritical() << "建索引失败:" << err;
+        return false;
     }
     qDebug() << "索引检查完成(不存在会自动创建)。";
     return true;
@@ -338,7 +245,8 @@ bool DBManager::writeSchemaVersion(int version)
 }
 
 // 按顺序执行尚未应用的增量迁移(每步一个事务, 只做增/改, 不删表不重建)。
-// 以后结构要变: 在这里按顺序追加一步(version 依次 +1)即可, 老数据不丢。
+// 每个迁移的 SQL 在 db/migrations/ 里, 编译进程序资源; 以后结构要变:
+// 新建 db/migrations/00N_xxx.sql 并在这里加一步、把 kSchemaVersion +1 即可。
 bool DBManager::applyMigrations(int fromVersion, QString *err)
 {
     auto fail = [&](const QString &msg) {
@@ -346,7 +254,7 @@ bool DBManager::applyMigrations(int fromVersion, QString *err)
         return false;
     };
 
-    // 迁移 1: station 表补 code_prefix 字段, 并从已有桩号(如 DR-01)回填前缀
+    // 迁移 1: station 补 code_prefix, 并从桩号回填前缀(仅当列不存在时执行该文件)
     if (fromVersion < 1) {
         if (!beginTransaction())
             return fail(QStringLiteral("迁移1: 开启事务失败"));
@@ -361,36 +269,31 @@ bool DBManager::applyMigrations(int fromVersion, QString *err)
             }
         }
         if (!hasPrefix) {
-            if (!q.exec(QStringLiteral(
-                    "ALTER TABLE station ADD COLUMN code_prefix TEXT NOT NULL DEFAULT '';"))) {
+            QString migErr;
+            if (!execResource(q, QStringLiteral(":/db/migrations/001_station_code_prefix.sql"),
+                              &migErr)) {
                 rollbackTransaction();
-                return fail(QStringLiteral("迁移1: 添加 code_prefix 失败: %1").arg(q.lastError().text()));
+                return fail(QStringLiteral("迁移1: %1").arg(migErr));
             }
-            q.exec(QStringLiteral(
-                "UPDATE station SET code_prefix = COALESCE("
-                "  (SELECT substr(c.code, 1, instr(c.code, '-') - 1) FROM charger c"
-                "    WHERE c.station_id = station.station_id AND instr(c.code, '-') > 0 LIMIT 1), '')"
-                " WHERE code_prefix = '';"));
         }
         if (!writeSchemaVersion(1) || !commitTransaction()) {
             rollbackTransaction();
             return fail(QStringLiteral("迁移1: 提交失败"));
         }
-        qDebug() << "数据库迁移 1 完成(station.code_prefix 补列并回填)。";
+        qDebug() << "数据库迁移 1 完成(station.code_prefix)。";
         fromVersion = 1;
     }
 
-    // 迁移 2: 电桩状态语义升级 —— 旧值{0空闲,1使用中,2故障} 改为 {0空闲,1已连接,2充电中,3故障}
+    // 迁移 2: 电桩状态语义升级(旧 使用中1→充电中2, 故障2→故障3)
     if (fromVersion < 2) {
         if (!beginTransaction())
             return fail(QStringLiteral("迁移2: 开启事务失败"));
         QSqlQuery q(db());
-        // 旧 1(使用中) 对应新 2(充电中); 旧 2(故障) 对应新 3(故障); 旧 0 不变
-        if (!q.exec(QStringLiteral(
-                "UPDATE charger SET status = CASE status "
-                "  WHEN 1 THEN 2 WHEN 2 THEN 3 ELSE status END;"))) {
+        QString migErr;
+        if (!execResource(q, QStringLiteral(":/db/migrations/002_charger_status_remap.sql"),
+                          &migErr)) {
             rollbackTransaction();
-            return fail(QStringLiteral("迁移2: 电桩状态重映射失败: %1").arg(q.lastError().text()));
+            return fail(QStringLiteral("迁移2: %1").arg(migErr));
         }
         if (!writeSchemaVersion(2) || !commitTransaction()) {
             rollbackTransaction();
@@ -400,45 +303,26 @@ bool DBManager::applyMigrations(int fromVersion, QString *err)
         fromVersion = 2;
     }
 
-    // 迁移 3: 为 BR-02/BR-03 部分唯一索引做数据清理。
-    // 旧版没有约束, 可能出现过"同一用户/同一电桩有多条未结算订单", 先取消旧的只留最新,
-    // 并释放已经没有任何活动订单的电桩, 否则建唯一索引会失败。
+    // 迁移 3: 加 BR-02/03 唯一索引前, 清理历史重复活动订单
     if (fromVersion < 3) {
         if (!beginTransaction())
             return fail(QStringLiteral("迁移3: 开启事务失败"));
         QSqlQuery q(db());
-        // 同一用户保留最新一条活动订单, 其余置已取消
-        q.exec(QStringLiteral(
-            "UPDATE charging_order SET status = 3 WHERE order_id IN ("
-            "  SELECT o.order_id FROM charging_order o"
-            "   WHERE o.status IN (0,1) AND EXISTS ("
-            "     SELECT 1 FROM charging_order o2"
-            "      WHERE o2.user_id = o.user_id AND o2.status IN (0,1) AND o2.order_id > o.order_id))"));
-        // 同一电桩保留最新一条活动订单, 其余置已取消
-        q.exec(QStringLiteral(
-            "UPDATE charging_order SET status = 3 WHERE order_id IN ("
-            "  SELECT o.order_id FROM charging_order o"
-            "   WHERE o.status IN (0,1) AND EXISTS ("
-            "     SELECT 1 FROM charging_order o2"
-            "      WHERE o2.charger_id = o.charger_id AND o2.status IN (0,1) AND o2.order_id > o.order_id))"));
-        // 释放那些已经没有任何活动订单、但仍显示占用中的电桩
-        q.exec(QStringLiteral(
-            "UPDATE charger SET status = 0 WHERE charger_id NOT IN ("
-            "  SELECT charger_id FROM charging_order WHERE status IN (0,1))"
-            "  AND status IN (1,2);"));
-        if (q.lastError().isValid()) {
+        QString migErr;
+        if (!execResource(q, QStringLiteral(":/db/migrations/003_clean_duplicate_orders.sql"),
+                          &migErr)) {
             rollbackTransaction();
-            return fail(QStringLiteral("迁移3: 清理重复订单失败: %1").arg(q.lastError().text()));
+            return fail(QStringLiteral("迁移3: %1").arg(migErr));
         }
         if (!writeSchemaVersion(3) || !commitTransaction()) {
             rollbackTransaction();
             return fail(QStringLiteral("迁移3: 提交失败"));
         }
-        qDebug() << "数据库迁移 3/3 完成(BR-02/03 唯一索引前清理)。";
+        qDebug() << "数据库迁移 3 完成(BR-02/03 唯一索引前清理)。";
         fromVersion = 3;
     }
 
-    // 以后新迁移照此继续加: if (fromVersion < 4) {...}
+    // 以后新迁移照此继续加: if (fromVersion < 4) {... 执行 /db/migrations/004_*.sql ...}
     return true;
 }
 

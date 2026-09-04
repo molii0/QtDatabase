@@ -81,6 +81,7 @@ private:
     QHttpServerResponse onAdminDeleteCharger(const QHttpServerRequest &req);
     QHttpServerResponse onAdminChargerAction(const QHttpServerRequest &req);  // fault/recover
     QHttpServerResponse onAdminListOrders(const QHttpServerRequest &req);
+    QHttpServerResponse onAdminOpsLogs(const QHttpServerRequest &req);        // /api/admin/logs
 
     // 把 DB 结果转成响应(带状态码映射); okData 仅成功时用
     QHttpServerResponse dbResult(bool ok, const QString &err,

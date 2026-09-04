@@ -4,6 +4,9 @@ QT += sql network httpserver
 CONFIG += c++17 cmdline
 CONFIG -= app_bundle
 
+# SQL(schema/indexes/migrations)以 Qt 资源形式编译进程序
+RESOURCES += db.qrc
+
 SOURCES += \
         main.cpp \
         ChargeState.cpp \
@@ -20,7 +23,9 @@ HEADERS += \
         DBManager.h \
         ChargeState.h \
         ApiServer.h \
-        test.h
+        charging_pile.h
+
+# 功能自检在 tests/tests.pro(独立目标, 不编进本程序)
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

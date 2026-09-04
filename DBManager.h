@@ -102,6 +102,17 @@ public:
         qint64 orders = 0;
     };
 
+    // 运维日志(ops_log 表)
+    struct OpsLog {
+        qint64  logId = 0;
+        QString adminAccount;
+        qint64  chargerId = 0;
+        QString chargerCode;
+        QString action;         // 如 标记故障 / 远程重启 / 恢复正常
+        QString detail;
+        QString createdAt;
+    };
+
     static DBManager& instance();
 
     // ---------------- 连接与初始化 ----------------
@@ -168,6 +179,11 @@ public:
     bool chargerStatusCount(ChargerStatusCount *out, QString *err = nullptr) const;
     bool revenueSummary(RevenueSummary *out, QString *err = nullptr) const;
     bool dailyRevenue(int days, QVector<RevenueDay> *out, QString *err = nullptr) const;
+
+    // ---------------- 运维日志(ops_log, UC-A-05) ----------------
+    bool addOpsLog(const QString &adminAccount, qint64 chargerId, const QString &chargerCode,
+                   const QString &action, const QString &detail = QString());
+    bool listOpsLogs(int limit, QVector<OpsLog> *out, QString *err = nullptr) const;
 
 private:
     DBManager();

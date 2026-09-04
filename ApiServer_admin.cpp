@@ -340,6 +340,14 @@ QHttpServerResponse ApiServer::onAdminChargerAction(const QHttpServerRequest &re
 
     DBManager::Charger c;
     m_db.getCharger(chargerId, &c);
+
+    // 记录一条运维日志(UC-A-05)
+    const QString actionText = action == QStringLiteral("fault") ? QStringLiteral("标记故障")
+                               : action == QStringLiteral("restart") ? QStringLiteral("远程重启")
+                                                                     : QStringLiteral("恢复正常");
+    m_db.addOpsLog(account, chargerId, c.code, actionText,
+                   QStringLiteral("由管理端 %1 执行").arg(account));
+
     QJsonObject data;
     data[QStringLiteral("chargerId")] = static_cast<double>(chargerId);
     data[QStringLiteral("status")] = c.status;
@@ -367,5 +375,38 @@ QHttpServerResponse ApiServer::onAdminListOrders(const QHttpServerRequest &req)
     }
     QJsonObject data;
     data[QStringLiteral("orders")] = arr;
+    return jsonOk(data);
+}
+
+// GET /api/admin/logs?limit=50  运维日志(倒序, 最近 limit 条)
+QHttpServerResponse ApiServer::onAdminOpsLogs(const QHttpServerRequest &req)
+{
+    QString account;
+    if (!requireAdmin(req, &account))
+        return unauthorized();
+
+    bool okLimit = false;
+    const int rawLimit = req.query().queryItemValue(QStringLiteral("limit")).toInt(&okLimit);
+    const int limit = (okLimit && rawLimit > 0) ? rawLimit : 50;
+
+    QVector<DBManager::OpsLog> logs;
+    QString err;
+    if (!m_db.listOpsLogs(limit, &logs, &err))
+        return jsonError(500, err);
+
+    QJsonArray arr;
+    for (const DBManager::OpsLog &o : logs) {
+        QJsonObject item;
+        item[QStringLiteral("logId")] = static_cast<double>(o.logId);
+        item[QStringLiteral("adminAccount")] = o.adminAccount;
+        item[QStringLiteral("chargerId")] = static_cast<double>(o.chargerId);
+        item[QStringLiteral("chargerCode")] = o.chargerCode;
+        item[QStringLiteral("action")] = o.action;
+        item[QStringLiteral("detail")] = o.detail;
+        item[QStringLiteral("createdAt")] = o.createdAt;
+        arr.append(item);
+    }
+    QJsonObject data;
+    data[QStringLiteral("logs")] = arr;
     return jsonOk(data);
 }
