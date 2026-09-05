@@ -25,17 +25,10 @@ Makefile*
 logs/
 avatars/
 
-# ---- 本地整份备份（手工备份用的旧代码，不进 git）----
-backup_complex/
-
 # ---- 操作系统垃圾文件 ----
 Thumbs.db
 Desktop.ini
 .DS_Store
 
-# ---- md文件 ----
-git使用小抄.md
-学习到的.md
-学习文档.md
-01-需求规格说明书.md
-04-数据库模块改进指引.md
+# ---- 学习文档 ----
+学习文档/
