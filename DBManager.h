@@ -39,6 +39,7 @@ public:
         qint64  userId = 0;
         QString phone;          // 手机号(登录凭证)
         QString nickname;
+        QString avatar;         // 头像(相对路径/文件名, 空串=默认灰头像)
         double  balance = 0.0;  // 钱包余额(元)
         int     status = 1;     // 1=正常 0=冻结
         QString registerTime;   // 注册时间
@@ -77,6 +78,10 @@ public:
         double  amount = 0.0;   // 充电费用(元)
         QString startTime;      // 开始充电时间
         QString endTime;        // 结束时间
+        // 下面是查询时 JOIN 出来的展示字段(小票/列表用), 非表字段
+        QString stationName;
+        QString chargerCode;
+        QString userPhone;
     };
 
     // 电桩状态分布统计(管理端用)
@@ -100,6 +105,14 @@ public:
         QString day;            // yyyy-MM-dd
         double amount = 0.0;
         qint64 orders = 0;
+    };
+
+    // 按电站/按电桩的营收排行(管理端用)
+    struct RevenueByItem {
+        qint64  id = 0;         // station_id 或 charger_id
+        QString name;           // 电站名 或 电桩编号
+        double  amount = 0.0;
+        qint64  orders = 0;
     };
 
     // 运维日志(ops_log 表)
@@ -134,6 +147,8 @@ public:
     bool listUsers(const QString &phoneKeyword, QVector<User> *out) const;  // 管理端用户列表(支持模糊)
     bool setUserStatus(qint64 userId, bool frozen, QString *err = nullptr); // 冻结/解冻
     bool updateBalance(qint64 userId, double delta);                 // 余额增减(充值正数/扣费负数)
+    bool updateNickname(qint64 userId, const QString &nickname, QString *err = nullptr); // 改昵称
+    bool updateAvatar(qint64 userId, const QString &avatar, QString *err = nullptr);     // 设置头像(相对路径)
 
     // ---------------- 管理员(admin) ----------------
     bool checkAdminLogin(const QString &account, const QString &password);  // 种子默认 admin/123456
@@ -172,13 +187,18 @@ public:
     // 4. 结束充电并结算(事务): 充电中 -> 已完成, 扣余额, 电桩 -> 空闲
     bool orderFinish(qint64 orderId, QString *err = nullptr);
 
-    QVector<Order> listOrders(qint64 userId = -1) const;             // 订单倒序; -1=全部
-    bool getOrderById(qint64 orderId, Order *out = nullptr) const;   // 查一条订单
+    QVector<Order> listOrders(qint64 userId = -1) const;             // 订单倒序; -1=全部(含站名/桩号)
+    bool getOrderById(qint64 orderId, Order *out = nullptr) const;   // 查一条订单(含站名/桩号)
+    // 当前用户的"未结算订单"(待支付0/充电中1); 有则回填 out 并返回 true
+    bool getActiveOrderOfUser(qint64 userId, Order *out = nullptr, QString *err = nullptr) const;
 
     // ---------------- 统计(管理端) ----------------
     bool chargerStatusCount(ChargerStatusCount *out, QString *err = nullptr) const;
     bool revenueSummary(RevenueSummary *out, QString *err = nullptr) const;
     bool dailyRevenue(int days, QVector<RevenueDay> *out, QString *err = nullptr) const;
+    // 近 days 天按电站 / 按电桩的营收排行(按金额降序)
+    bool revenueByStation(int days, QVector<RevenueByItem> *out, QString *err = nullptr) const;
+    bool revenueByCharger(int days, QVector<RevenueByItem> *out, QString *err = nullptr) const;
 
     // ---------------- 运维日志(ops_log, UC-A-05) ----------------
     bool addOpsLog(const QString &adminAccount, qint64 chargerId, const QString &chargerCode,
@@ -203,8 +223,8 @@ private:
     static QString nowStr();    // 当前本地时间 "yyyy-MM-dd HH:mm:ss"
     static double round2(double v);   // 金额/电量保留 2 位小数
 
-    static constexpr int kSchemaVersion = 3;    // 当前数据库结构版本
-    // v3: BR-02/03 部分唯一索引 + 补齐 ops_log/load_prediction/recharge_log 三张表
+    static constexpr int kSchemaVersion = 4;    // 当前数据库结构版本
+    // v3: BR-02/03 唯一索引 + ops_log/load_prediction/recharge_log 表; v4: user.avatar 字段
 
     QString m_dbPath;
     mutable QMutex m_openMutex; // 保护"每个线程首次建连接"的并发

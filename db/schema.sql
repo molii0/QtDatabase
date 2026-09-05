@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS user (
     user_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     phone         TEXT    NOT NULL UNIQUE,
     nickname      TEXT    NOT NULL,
+    avatar        TEXT    NOT NULL DEFAULT '',
     balance       REAL    NOT NULL DEFAULT 0,
     status        INTEGER NOT NULL DEFAULT 1,
     register_time TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))

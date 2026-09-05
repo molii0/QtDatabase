@@ -5,8 +5,12 @@
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonParseError>
+#include <QPair>
 #include <QRandomGenerator>
 #include <QTcpServer>
+
+#include <algorithm>
+#include <cmath>
 
 #include <QtHttpServer/qhttpserver.h>
 #include <QtHttpServer/qhttpserverrequest.h>
@@ -16,6 +20,24 @@
 // ApiServer 实现: 生命周期 / 路由注册 / 公共工具 / C端接口
 // (管理端接口在 ApiServer_admin.cpp)
 // ============================================================================
+
+namespace {
+
+// 球面距离(Haversine 公式), 返回公里
+double haversineKm(double lat1, double lon1, double lat2, double lon2)
+{
+    const double kR = 6371.0;   // 地球半径(km)
+    auto rad = [](double d) { return d * M_PI / 180.0; };
+    const double dLat = rad(lat2 - lat1);
+    const double dLon = rad(lon2 - lon1);
+    const double a = std::sin(dLat / 2) * std::sin(dLat / 2)
+                   + std::cos(rad(lat1)) * std::cos(rad(lat2))
+                     * std::sin(dLon / 2) * std::sin(dLon / 2);
+    const double c = 2.0 * std::atan2(std::sqrt(a), std::sqrt(1.0 - a));
+    return kR * c;
+}
+
+} // namespace
 
 ApiServer::ApiServer()
     : m_db(DBManager::instance())
@@ -42,6 +64,8 @@ bool ApiServer::start(quint16 port)
                   [this](const QHttpServerRequest &req) { return onUserLogin(req); });
     m_httpServer->route("/api/stations", QHttpServerRequest::Method::Get,
                   [this](const QHttpServerRequest &req) { return onListStations(req); });
+    m_httpServer->route("/api/stations/nearby", QHttpServerRequest::Method::Get,
+                  [this](const QHttpServerRequest &req) { return onNearbyStations(req); });
     m_httpServer->route("/api/chargers", QHttpServerRequest::Method::Get,
                   [this](const QHttpServerRequest &req) { return onListChargers(req); });
     m_httpServer->route("/api/charges", QHttpServerRequest::Method::Post,
@@ -71,6 +95,16 @@ bool ApiServer::start(quint16 port)
                       Q_UNUSED(id);
                       return onRecharge(req);
                   });
+    m_httpServer->route("/api/users/<arg>/profile", QHttpServerRequest::Method::Put,
+                  [this](const QString &id, const QHttpServerRequest &req) {
+                      Q_UNUSED(id);
+                      return onUpdateProfile(req);
+                  });
+    m_httpServer->route("/api/users/<arg>/active-order", QHttpServerRequest::Method::Get,
+                  [this](const QString &id, const QHttpServerRequest &req) {
+                      Q_UNUSED(id);
+                      return onActiveOrder(req);
+                  });
 
     // ---------------- 管理端 ----------------
     m_httpServer->route("/api/admin/login", QHttpServerRequest::Method::Post,
@@ -88,6 +122,10 @@ bool ApiServer::start(quint16 port)
                   [this](const QHttpServerRequest &req) { return onAdminStats(req); });
     m_httpServer->route("/api/admin/stats/daily", QHttpServerRequest::Method::Get,
                   [this](const QHttpServerRequest &req) { return onAdminDailyRevenue(req); });
+    m_httpServer->route("/api/admin/stats/by-station", QHttpServerRequest::Method::Get,
+                  [this](const QHttpServerRequest &req) { return onAdminRevenueByStation(req); });
+    m_httpServer->route("/api/admin/stats/by-charger", QHttpServerRequest::Method::Get,
+                  [this](const QHttpServerRequest &req) { return onAdminRevenueByCharger(req); });
     m_httpServer->route("/api/admin/stations", QHttpServerRequest::Method::Post,
                   [this](const QHttpServerRequest &req) { return onAdminCreateStation(req); });
     m_httpServer->route("/api/admin/stations/<arg>", QHttpServerRequest::Method::Put,
@@ -129,7 +167,8 @@ bool ApiServer::start(quint16 port)
     return true;
 }
 
-// 把 DB 操作结果包成标准 HTTP 响应: 成功 okStatus + okData, 失败按文案选状态码
+// ------------------------- 公共工具 -------------------------
+
 QHttpServerResponse ApiServer::dbResult(bool ok, const QString &err,
                                         const QJsonObject &okData, int okStatus)
 {
@@ -166,6 +205,17 @@ QHttpServerResponse ApiServer::jsonCreated(const QJsonObject &body)
     return QHttpServerResponse(body, QHttpServerResponder::StatusCode::Created);
 }
 
+QHttpServerResponse ApiServer::forbidden(const QString &msg)
+{
+    return jsonError(403, msg);
+}
+
+QString ApiServer::newToken()
+{
+    return QString::number(QRandomGenerator::global()->generate64(), 16)
+         + QString::number(QRandomGenerator::global()->generate64(), 16);
+}
+
 bool ApiServer::parseBody(const QHttpServerRequest &req, QJsonObject *out)
 {
     QJsonParseError perr;
@@ -188,7 +238,27 @@ qint64 ApiServer::pathId(const QString &path, int index)
     return parseId(path.split(QLatin1Char('/')).value(index));
 }
 
-// ---------------- JSON 序列化 ----------------
+// 从请求头取 Bearer token(为空表示未带)
+static QString bearerToken(const QHttpServerRequest &req)
+{
+    const QByteArray value = QByteArray(req.headers().value(QByteArrayLiteral("authorization")).trimmed());
+    if (!value.startsWith("Bearer "))
+        return QString();
+    return QString::fromLatin1(value.mid(7));
+}
+
+// 用户端鉴权: token 有效则回填 userId
+bool ApiServer::requireUser(const QHttpServerRequest &req, qint64 *userId)
+{
+    const QString token = bearerToken(req);
+    if (token.isEmpty() || !m_userTokens.contains(token))
+        return false;
+    if (userId)
+        *userId = m_userTokens.value(token);
+    return true;
+}
+
+// ------------------------- JSON 序列化 -------------------------
 
 QJsonObject ApiServer::userJson(const DBManager::User &u) const
 {
@@ -196,6 +266,7 @@ QJsonObject ApiServer::userJson(const DBManager::User &u) const
     o[QStringLiteral("userId")] = static_cast<double>(u.userId);
     o[QStringLiteral("phone")] = u.phone;
     o[QStringLiteral("nickname")] = u.nickname;
+    o[QStringLiteral("avatar")] = u.avatar;
     o[QStringLiteral("balance")] = u.balance;
     o[QStringLiteral("status")] = u.status;         // 1=正常 0=冻结
     o[QStringLiteral("statusText")] = u.status == 1 ? QStringLiteral("正常") : QStringLiteral("冻结");
@@ -203,7 +274,7 @@ QJsonObject ApiServer::userJson(const DBManager::User &u) const
     return o;
 }
 
-QJsonObject ApiServer::stationJson(const DBManager::Station &s) const
+QJsonObject ApiServer::stationJson(const DBManager::Station &s, double distanceKm) const
 {
     QJsonObject o;
     o[QStringLiteral("stationId")] = static_cast<double>(s.stationId);
@@ -228,6 +299,11 @@ QJsonObject ApiServer::stationJson(const DBManager::Station &s) const
     o[QStringLiteral("connectedChargers")] = connected;
     o[QStringLiteral("chargingChargers")] = charging;
     o[QStringLiteral("faultChargers")] = fault;
+    // 在线率 = 非故障桩占比
+    o[QStringLiteral("onlineRate")] =
+        total > 0 ? std::round((total - fault) * 100.0 / total) : 100.0;
+    if (distanceKm >= 0.0)
+        o[QStringLiteral("distanceKm")] = std::round(distanceKm * 10.0) / 10.0;  // 保留1位
     return o;
 }
 
@@ -251,8 +327,11 @@ QJsonObject ApiServer::orderJson(const DBManager::Order &o) const
     j[QStringLiteral("orderId")] = static_cast<double>(o.orderId);
     j[QStringLiteral("orderNo")] = o.orderNo;
     j[QStringLiteral("userId")] = static_cast<double>(o.userId);
+    j[QStringLiteral("userPhone")] = o.userPhone;
     j[QStringLiteral("stationId")] = static_cast<double>(o.stationId);
+    j[QStringLiteral("stationName")] = o.stationName;
     j[QStringLiteral("chargerId")] = static_cast<double>(o.chargerId);
+    j[QStringLiteral("chargerCode")] = o.chargerCode;
     j[QStringLiteral("status")] = o.status;
     j[QStringLiteral("statusText")] = orderStateText(o.status);
     j[QStringLiteral("energy")] = o.energy;
@@ -262,9 +341,9 @@ QJsonObject ApiServer::orderJson(const DBManager::Order &o) const
     return j;
 }
 
-// ---------------- C 端接口 ----------------
+// ------------------------- C 端接口 -------------------------
 
-// POST /api/users/login  手机号免密登录, 不存在自动注册
+// POST /api/users/login  手机号免密登录(不存在自动注册); 返回用户 + token
 QHttpServerResponse ApiServer::onUserLogin(const QHttpServerRequest &req)
 {
     QJsonObject body;
@@ -286,7 +365,11 @@ QHttpServerResponse ApiServer::onUserLogin(const QHttpServerRequest &req)
     if (u.status == 0)
         return jsonError(403, QStringLiteral("账号已被冻结，请联系客服"));
 
+    const QString token = newToken();
+    m_userTokens.insert(token, u.userId);
+
     QJsonObject data;
+    data[QStringLiteral("token")] = token;
     data[QStringLiteral("user")] = userJson(u);
     return jsonOk(data);
 }
@@ -299,6 +382,33 @@ QHttpServerResponse ApiServer::onListStations(const QHttpServerRequest &req)
     const QVector<DBManager::Station> stations = m_db.listStations();
     for (const DBManager::Station &s : stations)
         arr.append(stationJson(s));
+    QJsonObject data;
+    data[QStringLiteral("stations")] = arr;
+    return jsonOk(data);
+}
+
+// GET /api/stations/nearby?latitude=..&longitude=..  按距离升序
+QHttpServerResponse ApiServer::onNearbyStations(const QHttpServerRequest &req)
+{
+    bool okLat = false, okLng = false;
+    const double lat = req.query().queryItemValue(QStringLiteral("latitude")).toDouble(&okLat);
+    const double lng = req.query().queryItemValue(QStringLiteral("longitude")).toDouble(&okLng);
+    if (!okLat || !okLng || lat < -90 || lat > 90 || lng < -180 || lng > 180)
+        return jsonError(400, QStringLiteral("请提供合法的 latitude/longitude"));
+
+    QVector<QPair<double, DBManager::Station>> withDist;   // 距离 -> 电站
+    const QVector<DBManager::Station> stations = m_db.listStations();
+    for (const DBManager::Station &s : stations) {
+        const double d = haversineKm(lat, lng, s.latitude, s.longitude);
+        withDist.append({d, s});
+    }
+    std::sort(withDist.begin(), withDist.end(),
+              [](const QPair<double, DBManager::Station> &a,
+                 const QPair<double, DBManager::Station> &b) { return a.first < b.first; });
+
+    QJsonArray arr;
+    for (const auto &item : withDist)
+        arr.append(stationJson(item.second, item.first));
     QJsonObject data;
     data[QStringLiteral("stations")] = arr;
     return jsonOk(data);
@@ -317,20 +427,27 @@ QHttpServerResponse ApiServer::onListChargers(const QHttpServerRequest &req)
     return jsonOk(data);
 }
 
-// POST /api/charges {userId, chargerId}  选桩下单(待支付, 电桩已连接)
+// POST /api/charges {chargerId}  选桩下单(带用户 token; 待支付, 电桩已连接)
 QHttpServerResponse ApiServer::onCreateCharge(const QHttpServerRequest &req)
 {
+    qint64 authId = 0;
+    if (!requireUser(req, &authId))
+        return unauthorized();
+
     QJsonObject body;
     if (!parseBody(req, &body))
         return jsonError(400, QStringLiteral("请求体必须是 JSON"));
-    const qint64 userId = static_cast<qint64>(body.value(QStringLiteral("userId")).toDouble());
+    // 可选传 userId, 但必须等于 token 对应的用户
+    const qint64 bodyUserId = static_cast<qint64>(body.value(QStringLiteral("userId")).toDouble());
+    if (bodyUserId > 0 && bodyUserId != authId)
+        return forbidden(QStringLiteral("无权操作其他用户账号"));
     const qint64 chargerId = static_cast<qint64>(body.value(QStringLiteral("chargerId")).toDouble());
-    if (userId <= 0 || chargerId <= 0)
-        return jsonError(400, QStringLiteral("缺少 userId 或 chargerId"));
+    if (chargerId <= 0)
+        return jsonError(400, QStringLiteral("缺少 chargerId"));
 
     QString err;
     qint64 orderId = 0;
-    if (!m_db.orderConnect(userId, chargerId, &orderId, &err))
+    if (!m_db.orderConnect(authId, chargerId, &orderId, &err))
         return jsonError(dbErrorStatus(err), err);
 
     DBManager::Order o;
@@ -340,42 +457,64 @@ QHttpServerResponse ApiServer::onCreateCharge(const QHttpServerRequest &req)
     return jsonCreated(data);
 }
 
-// POST /api/charges/<id>/start
 QHttpServerResponse ApiServer::onStartCharge(const QHttpServerRequest &req)
 {
+    qint64 authId = 0;
+    if (!requireUser(req, &authId))
+        return unauthorized();
     const qint64 orderId = pathId(req.url().path(), 3);   // /api/charges/<id>/start
     if (orderId <= 0)
         return jsonError(400, QStringLiteral("订单号无效"));
 
+    DBManager::Order o;
+    if (!m_db.getOrderById(orderId, &o))
+        return jsonError(404, QStringLiteral("订单不存在"));
+    if (o.userId != authId)
+        return forbidden(QStringLiteral("无权操作他人的订单"));
+
     QString err;
     if (!m_db.orderStart(orderId, &err))
         return jsonError(dbErrorStatus(err), err);
-    DBManager::Order o;
     m_db.getOrderById(orderId, &o);
     return jsonOk(orderJson(o));
 }
 
-// POST /api/charges/<id>/finish
 QHttpServerResponse ApiServer::onFinishCharge(const QHttpServerRequest &req)
 {
+    qint64 authId = 0;
+    if (!requireUser(req, &authId))
+        return unauthorized();
     const qint64 orderId = pathId(req.url().path(), 3);
     if (orderId <= 0)
         return jsonError(400, QStringLiteral("订单号无效"));
 
+    DBManager::Order o;
+    if (!m_db.getOrderById(orderId, &o))
+        return jsonError(404, QStringLiteral("订单不存在"));
+    if (o.userId != authId)
+        return forbidden(QStringLiteral("无权操作他人的订单"));
+
     QString err;
     if (!m_db.orderFinish(orderId, &err))
         return jsonError(dbErrorStatus(err), err);
-    DBManager::Order o;
     m_db.getOrderById(orderId, &o);
     return jsonOk(orderJson(o));
 }
 
-// DELETE /api/charges/<id>  取消未开始的订单
 QHttpServerResponse ApiServer::onCancelCharge(const QHttpServerRequest &req)
 {
+    qint64 authId = 0;
+    if (!requireUser(req, &authId))
+        return unauthorized();
     const qint64 orderId = pathId(req.url().path(), 3);   // /api/charges/<id>
     if (orderId <= 0)
         return jsonError(400, QStringLiteral("订单号无效"));
+
+    DBManager::Order o;
+    if (!m_db.getOrderById(orderId, &o))
+        return jsonError(404, QStringLiteral("订单不存在"));
+    if (o.userId != authId)
+        return forbidden(QStringLiteral("无权操作他人的订单"));
 
     QString err;
     if (!m_db.orderCancel(orderId, &err))
@@ -385,12 +524,15 @@ QHttpServerResponse ApiServer::onCancelCharge(const QHttpServerRequest &req)
     return jsonOk(data);
 }
 
-// GET /api/users/<id>/orders
+// GET /api/users/<id>/orders(需该用户的 token)
 QHttpServerResponse ApiServer::onUserOrders(const QHttpServerRequest &req)
 {
-    const qint64 userId = pathId(req.url().path(), 3);   // /api/users/<id>/orders
-    if (userId <= 0)
-        return jsonError(400, QStringLiteral("userId 无效"));
+    qint64 authId = 0;
+    if (!requireUser(req, &authId))
+        return unauthorized();
+    const qint64 userId = pathId(req.url().path(), 3);
+    if (userId <= 0 || userId != authId)
+        return forbidden(QStringLiteral("无权查看其他用户的数据"));
 
     QJsonArray arr;
     const QVector<DBManager::Order> orders = m_db.listOrders(userId);
@@ -401,12 +543,15 @@ QHttpServerResponse ApiServer::onUserOrders(const QHttpServerRequest &req)
     return jsonOk(data);
 }
 
-// POST /api/users/<id>/recharge {amount}
+// POST /api/users/<id>/recharge {amount}(需该用户的 token)
 QHttpServerResponse ApiServer::onRecharge(const QHttpServerRequest &req)
 {
+    qint64 authId = 0;
+    if (!requireUser(req, &authId))
+        return unauthorized();
     const qint64 userId = pathId(req.url().path(), 3);
-    if (userId <= 0)
-        return jsonError(400, QStringLiteral("userId 无效"));
+    if (userId <= 0 || userId != authId)
+        return forbidden(QStringLiteral("无权操作其他用户的账号"));
 
     QJsonObject body;
     if (!parseBody(req, &body))
@@ -423,5 +568,59 @@ QHttpServerResponse ApiServer::onRecharge(const QHttpServerRequest &req)
     m_db.getUserById(userId, &u);
     QJsonObject data;
     data[QStringLiteral("user")] = userJson(u);
+    return jsonOk(data);
+}
+
+// PUT /api/users/<id>/profile {nickname?, avatar?}(需该用户的 token)
+QHttpServerResponse ApiServer::onUpdateProfile(const QHttpServerRequest &req)
+{
+    qint64 authId = 0;
+    if (!requireUser(req, &authId))
+        return unauthorized();
+    const qint64 userId = pathId(req.url().path(), 3);
+    if (userId <= 0 || userId != authId)
+        return forbidden(QStringLiteral("无权修改其他用户的资料"));
+
+    QJsonObject body;
+    if (!parseBody(req, &body))
+        return jsonError(400, QStringLiteral("请求体必须是 JSON"));
+    const bool hasNickname = body.contains(QStringLiteral("nickname"));
+    const bool hasAvatar = body.contains(QStringLiteral("avatar"));
+    if (!hasNickname && !hasAvatar)
+        return jsonError(400, QStringLiteral("没有需要修改的字段(至少给 nickname 或 avatar)"));
+
+    QString err;
+    if (hasNickname && !m_db.updateNickname(userId, body.value(QStringLiteral("nickname")).toString(), &err))
+        return jsonError(dbErrorStatus(err), err);
+    if (hasAvatar && !m_db.updateAvatar(userId, body.value(QStringLiteral("avatar")).toString(), &err))
+        return jsonError(dbErrorStatus(err), err);
+
+    DBManager::User u;
+    m_db.getUserById(userId, &u);
+    QJsonObject data;
+    data[QStringLiteral("user")] = userJson(u);
+    return jsonOk(data);
+}
+
+// GET /api/users/<id>/active-order  当前未结算订单(需该用户的 token)
+QHttpServerResponse ApiServer::onActiveOrder(const QHttpServerRequest &req)
+{
+    qint64 authId = 0;
+    if (!requireUser(req, &authId))
+        return unauthorized();
+    const qint64 userId = pathId(req.url().path(), 3);
+    if (userId <= 0 || userId != authId)
+        return forbidden(QStringLiteral("无权查看其他用户的数据"));
+
+    DBManager::Order o;
+    QString err;
+    const bool found = m_db.getActiveOrderOfUser(userId, &o, &err);
+    if (!err.isEmpty())
+        return jsonError(500, err);
+    QJsonObject data;
+    if (found)
+        data[QStringLiteral("order")] = orderJson(o);
+    else
+        data[QStringLiteral("order")] = QJsonValue(QJsonValue::Null);   // 没有未结算订单
     return jsonOk(data);
 }

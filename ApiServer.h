@@ -45,27 +45,34 @@ private:
     qint64 pathId(const QString &path, int index);
     // DB 失败信息 -> HTTP 状态码(按文案智能猜测: 冻结403/不存在404/其它冲突409/空500)
     int dbErrorStatus(const QString &msg);
+    QString newToken();     // 生成一个随机 token(登录用)
+    QHttpServerResponse forbidden(const QString &msg);   // 403 响应
 
     // JSON 序列化
     QJsonObject userJson(const DBManager::User &u) const;
-    QJsonObject stationJson(const DBManager::Station &s) const;   // 附带桩数统计
+    QJsonObject stationJson(const DBManager::Station &s, double distanceKm = -1.0) const; // -1 不带距离
     QJsonObject chargerJson(const DBManager::Charger &c) const;
     QJsonObject orderJson(const DBManager::Order &o) const;
 
     // 管理端鉴权: 校验 Authorization: Bearer <token>; 通过返回 true 并回填账号
     bool requireAdmin(const QHttpServerRequest &req, QString *account);
+    // 用户端鉴权: 校验 Bearer token -> 回填 userId
+    bool requireUser(const QHttpServerRequest &req, qint64 *userId);
     QHttpServerResponse unauthorized();   // 401 响应(未登录/token 无效)
 
     // ---------------- C 端(用户)接口 ----------------
     QHttpServerResponse onUserLogin(const QHttpServerRequest &req);
     QHttpServerResponse onListStations(const QHttpServerRequest &req);
-    QHttpServerResponse onListChargers(const QHttpServerRequest &req);       // ?stationId=
-    QHttpServerResponse onCreateCharge(const QHttpServerRequest &req);       // 选桩下单(待支付)
-    QHttpServerResponse onStartCharge(const QHttpServerRequest &req);        // /charges/<id>/start
-    QHttpServerResponse onFinishCharge(const QHttpServerRequest &req);       // /charges/<id>/finish
-    QHttpServerResponse onCancelCharge(const QHttpServerRequest &req);       // /charges/<id>
-    QHttpServerResponse onUserOrders(const QHttpServerRequest &req);         // /users/<id>/orders
-    QHttpServerResponse onRecharge(const QHttpServerRequest &req);           // /users/<id>/recharge
+    QHttpServerResponse onNearbyStations(const QHttpServerRequest &req);      // 附近电站(距离排序)
+    QHttpServerResponse onListChargers(const QHttpServerRequest &req);        // ?stationId=
+    QHttpServerResponse onCreateCharge(const QHttpServerRequest &req);        // 选桩下单(待支付)
+    QHttpServerResponse onStartCharge(const QHttpServerRequest &req);         // /charges/<id>/start
+    QHttpServerResponse onFinishCharge(const QHttpServerRequest &req);        // /charges/<id>/finish
+    QHttpServerResponse onCancelCharge(const QHttpServerRequest &req);        // /charges/<id>
+    QHttpServerResponse onUserOrders(const QHttpServerRequest &req);          // /users/<id>/orders
+    QHttpServerResponse onRecharge(const QHttpServerRequest &req);            // /users/<id>/recharge
+    QHttpServerResponse onUpdateProfile(const QHttpServerRequest &req);       // /users/<id>/profile
+    QHttpServerResponse onActiveOrder(const QHttpServerRequest &req);         // /users/<id>/active-order
 
     // ---------------- 管理端接口(均在 ApiServer_admin.cpp) ----------------
     QHttpServerResponse onAdminLogin(const QHttpServerRequest &req);
@@ -74,14 +81,16 @@ private:
     QHttpServerResponse onAdminSetUserStatus(const QHttpServerRequest &req);
     QHttpServerResponse onAdminStats(const QHttpServerRequest &req);
     QHttpServerResponse onAdminDailyRevenue(const QHttpServerRequest &req);
+    QHttpServerResponse onAdminRevenueByStation(const QHttpServerRequest &req);
+    QHttpServerResponse onAdminRevenueByCharger(const QHttpServerRequest &req);
     QHttpServerResponse onAdminCreateStation(const QHttpServerRequest &req);
     QHttpServerResponse onAdminUpdateStation(const QHttpServerRequest &req);
     QHttpServerResponse onAdminDeleteStation(const QHttpServerRequest &req);
     QHttpServerResponse onAdminBatchChargers(const QHttpServerRequest &req);
     QHttpServerResponse onAdminDeleteCharger(const QHttpServerRequest &req);
-    QHttpServerResponse onAdminChargerAction(const QHttpServerRequest &req);  // fault/recover
+    QHttpServerResponse onAdminChargerAction(const QHttpServerRequest &req);   // fault/recover
     QHttpServerResponse onAdminListOrders(const QHttpServerRequest &req);
-    QHttpServerResponse onAdminOpsLogs(const QHttpServerRequest &req);        // /api/admin/logs
+    QHttpServerResponse onAdminOpsLogs(const QHttpServerRequest &req);         // /api/admin/logs
 
     // 把 DB 结果转成响应(带状态码映射); okData 仅成功时用
     QHttpServerResponse dbResult(bool ok, const QString &err,
@@ -89,7 +98,8 @@ private:
                                  int okStatus = 200);
 
     DBManager &m_db;
-    QHash<QString, QString> m_tokens;   // token -> 管理员账号
+    QHash<QString, QString> m_tokens;       // token -> 管理员账号
+    QHash<QString, qint64> m_userTokens;    // token -> 用户 id
     QHttpServer *m_httpServer = nullptr;    // 在 start() 中创建, dtor 释放
 };
 

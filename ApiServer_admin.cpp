@@ -4,7 +4,6 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonParseError>
-#include <QRandomGenerator>
 
 #include <QtHttpServer/qhttpserverrequest.h>
 #include <QtHttpServer/qhttpserverresponse.h>
@@ -57,8 +56,7 @@ QHttpServerResponse ApiServer::onAdminLogin(const QHttpServerRequest &req)
         return jsonError(401, QStringLiteral("账号或密码错误"));
 
     // 生成一个随机 token 并记住(退出登录后失效)
-    const QString token = QString::number(QRandomGenerator::global()->generate64(), 16)
-                        + QString::number(QRandomGenerator::global()->generate64(), 16);
+    const QString token = newToken();
     m_tokens.insert(token, account);
 
     QJsonObject data;
@@ -408,5 +406,65 @@ QHttpServerResponse ApiServer::onAdminOpsLogs(const QHttpServerRequest &req)
     }
     QJsonObject data;
     data[QStringLiteral("logs")] = arr;
+    return jsonOk(data);
+}
+
+// GET /api/admin/stats/by-station?days=30  近 days 天各电站营收排行(降序)
+QHttpServerResponse ApiServer::onAdminRevenueByStation(const QHttpServerRequest &req)
+{
+    QString account;
+    if (!requireAdmin(req, &account))
+        return unauthorized();
+
+    bool okDays = false;
+    const int days = req.query().queryItemValue(QStringLiteral("days")).toInt(&okDays);
+    const int n = (okDays && days > 0 && days <= 366) ? days : 30;
+
+    QVector<DBManager::RevenueByItem> items;
+    QString err;
+    if (!m_db.revenueByStation(n, &items, &err))
+        return jsonError(500, err);
+
+    QJsonArray arr;
+    for (const DBManager::RevenueByItem &r : items) {
+        QJsonObject item;
+        item[QStringLiteral("id")] = static_cast<double>(r.id);
+        item[QStringLiteral("name")] = r.name;
+        item[QStringLiteral("amount")] = r.amount;
+        item[QStringLiteral("orders")] = static_cast<double>(r.orders);
+        arr.append(item);
+    }
+    QJsonObject data;
+    data[QStringLiteral("items")] = arr;
+    return jsonOk(data);
+}
+
+// GET /api/admin/stats/by-charger?days=30  近 days 天各电桩营收排行(降序)
+QHttpServerResponse ApiServer::onAdminRevenueByCharger(const QHttpServerRequest &req)
+{
+    QString account;
+    if (!requireAdmin(req, &account))
+        return unauthorized();
+
+    bool okDays = false;
+    const int days = req.query().queryItemValue(QStringLiteral("days")).toInt(&okDays);
+    const int n = (okDays && days > 0 && days <= 366) ? days : 30;
+
+    QVector<DBManager::RevenueByItem> items;
+    QString err;
+    if (!m_db.revenueByCharger(n, &items, &err))
+        return jsonError(500, err);
+
+    QJsonArray arr;
+    for (const DBManager::RevenueByItem &r : items) {
+        QJsonObject item;
+        item[QStringLiteral("id")] = static_cast<double>(r.id);
+        item[QStringLiteral("name")] = r.name;
+        item[QStringLiteral("amount")] = r.amount;
+        item[QStringLiteral("orders")] = static_cast<double>(r.orders);
+        arr.append(item);
+    }
+    QJsonObject data;
+    data[QStringLiteral("items")] = arr;
     return jsonOk(data);
 }

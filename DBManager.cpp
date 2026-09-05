@@ -322,7 +322,26 @@ bool DBManager::applyMigrations(int fromVersion, QString *err)
         fromVersion = 3;
     }
 
-    // 以后新迁移照此继续加: if (fromVersion < 4) {... 执行 /db/migrations/004_*.sql ...}
+    // 迁移 4: user 表补 avatar 字段(C端用户资料)
+    if (fromVersion < 4) {
+        if (!beginTransaction())
+            return fail(QStringLiteral("迁移4: 开启事务失败"));
+        QSqlQuery q(db());
+        QString migErr;
+        if (!execResource(q, QStringLiteral(":/db/migrations/004_add_user_avatar.sql"),
+                          &migErr)) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移4: %1").arg(migErr));
+        }
+        if (!writeSchemaVersion(4) || !commitTransaction()) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移4: 提交失败"));
+        }
+        qDebug() << "数据库迁移 4 完成(user.avatar)。";
+        fromVersion = 4;
+    }
+
+    // 以后新迁移照此继续加: if (fromVersion < 5) {... 执行 /db/migrations/005_*.sql ...}
     return true;
 }
 

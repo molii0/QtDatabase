@@ -118,3 +118,81 @@ bool DBManager::dailyRevenue(int days, QVector<RevenueDay> *out, QString *err) c
     }
     return true;
 }
+
+// 时间窗口的起始/结束串(含当天, 近 days 天)
+static void windowBounds(int days, QString *start, QString *end)
+{
+    *start = QDate::currentDate().addDays(-(days - 1))
+                 .toString(QStringLiteral("yyyy-MM-dd"))
+             + QStringLiteral(" 00:00:00");
+    *end = QDate::currentDate().addDays(1).toString(QStringLiteral("yyyy-MM-dd"))
+           + QStringLiteral(" 00:00:00");
+}
+
+// 近 days 天按电站聚合营收(只统计已完成订单), 金额降序
+bool DBManager::revenueByStation(int days, QVector<RevenueByItem> *out, QString *err) const
+{
+    if (!out || days <= 0 || days > 366) {
+        if (err) *err = QStringLiteral("revenueByStation: 参数非法(days 需在 1~366)");
+        return false;
+    }
+    out->clear();
+    QString startStr, endStr;
+    windowBounds(days, &startStr, &endStr);
+
+    QSqlQuery q(db());
+    q.prepare(QStringLiteral(
+        "SELECT st.station_id, st.name, ROUND(SUM(o.amount), 2), COUNT(*)"
+        "  FROM charging_order o JOIN station st ON st.station_id = o.station_id"
+        " WHERE o.status = 2 AND o.end_time >= :start AND o.end_time < :end"
+        " GROUP BY st.station_id ORDER BY SUM(o.amount) DESC;"));
+    q.bindValue(QStringLiteral(":start"), startStr);
+    q.bindValue(QStringLiteral(":end"), endStr);
+    if (!q.exec()) {
+        if (err) *err = QStringLiteral("按电站统计营收失败: %1").arg(q.lastError().text());
+        return false;
+    }
+    while (q.next()) {
+        RevenueByItem r;
+        r.id = q.value(0).toLongLong();
+        r.name = q.value(1).toString();
+        r.amount = q.value(2).toDouble();
+        r.orders = q.value(3).toLongLong();
+        out->append(r);
+    }
+    return true;
+}
+
+// 近 days 天按电桩聚合营收(只统计已完成订单), 金额降序
+bool DBManager::revenueByCharger(int days, QVector<RevenueByItem> *out, QString *err) const
+{
+    if (!out || days <= 0 || days > 366) {
+        if (err) *err = QStringLiteral("revenueByCharger: 参数非法(days 需在 1~366)");
+        return false;
+    }
+    out->clear();
+    QString startStr, endStr;
+    windowBounds(days, &startStr, &endStr);
+
+    QSqlQuery q(db());
+    q.prepare(QStringLiteral(
+        "SELECT c.charger_id, c.code, ROUND(SUM(o.amount), 2), COUNT(*)"
+        "  FROM charging_order o JOIN charger c ON c.charger_id = o.charger_id"
+        " WHERE o.status = 2 AND o.end_time >= :start AND o.end_time < :end"
+        " GROUP BY c.charger_id ORDER BY SUM(o.amount) DESC;"));
+    q.bindValue(QStringLiteral(":start"), startStr);
+    q.bindValue(QStringLiteral(":end"), endStr);
+    if (!q.exec()) {
+        if (err) *err = QStringLiteral("按电桩统计营收失败: %1").arg(q.lastError().text());
+        return false;
+    }
+    while (q.next()) {
+        RevenueByItem r;
+        r.id = q.value(0).toLongLong();
+        r.name = q.value(1).toString();
+        r.amount = q.value(2).toDouble();
+        r.orders = q.value(3).toLongLong();
+        out->append(r);
+    }
+    return true;
+}

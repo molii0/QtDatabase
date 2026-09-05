@@ -24,28 +24,61 @@ QString DBManager::makeOrderNo()
         .arg(QRandomGenerator::global()->bounded(10000), 4, 10, QLatin1Char('0'));
 }
 
+// 订单查询公共列(JION 出站名/桩号/手机号, 供列表与小票展示)
+static const char kOrderCols[] =
+    "SELECT o.order_id, o.order_no, o.user_id, o.station_id, o.charger_id, o.status,"
+    "       o.energy, o.amount, o.start_time, o.end_time,"
+    "       s.name, c.code, u.phone"
+    "  FROM charging_order o"
+    "  JOIN station s ON s.station_id = o.station_id"
+    "  JOIN charger c ON c.charger_id = o.charger_id"
+    "  JOIN \"user\" u ON u.user_id = o.user_id ";
+
+static void fillOrder(QSqlQuery &q, DBManager::Order &o)
+{
+    o.orderId = q.value(0).toLongLong();
+    o.orderNo = q.value(1).toString();
+    o.userId = q.value(2).toLongLong();
+    o.stationId = q.value(3).toLongLong();
+    o.chargerId = q.value(4).toLongLong();
+    o.status = q.value(5).toInt();
+    o.energy = q.value(6).toDouble();
+    o.amount = q.value(7).toDouble();
+    o.startTime = q.value(8).toString();
+    o.endTime = q.value(9).toString();
+    o.stationName = q.value(10).toString();
+    o.chargerCode = q.value(11).toString();
+    o.userPhone = q.value(12).toString();
+}
+
 bool DBManager::getOrderById(qint64 orderId, Order *out) const
 {
     QSqlQuery q(db());
-    q.prepare(QStringLiteral(
-        "SELECT order_id, order_no, user_id, station_id, charger_id, status,"
-        "       energy, amount, start_time, end_time"
-        " FROM charging_order WHERE order_id = :id;"));
+    q.prepare(QString::fromLatin1(kOrderCols) + QStringLiteral("WHERE o.order_id = :id;"));
     q.bindValue(QStringLiteral(":id"), orderId);
     if (!q.exec() || !q.next())
         return false;
-    if (out) {
-        out->orderId = q.value(0).toLongLong();
-        out->orderNo = q.value(1).toString();
-        out->userId = q.value(2).toLongLong();
-        out->stationId = q.value(3).toLongLong();
-        out->chargerId = q.value(4).toLongLong();
-        out->status = q.value(5).toInt();
-        out->energy = q.value(6).toDouble();
-        out->amount = q.value(7).toDouble();
-        out->startTime = q.value(8).toString();
-        out->endTime = q.value(9).toString();
+    if (out)
+        fillOrder(q, *out);
+    return true;
+}
+
+// 当前用户未结算订单(待支付0/充电中1); 无则返回 false(不视为错误)
+bool DBManager::getActiveOrderOfUser(qint64 userId, Order *out, QString *err) const
+{
+    QSqlQuery q(db());
+    q.prepare(QString::fromLatin1(kOrderCols)
+              + QStringLiteral("WHERE o.user_id = :id AND o.status IN (0, 1) "
+                               "ORDER BY o.order_id DESC LIMIT 1;"));
+    q.bindValue(QStringLiteral(":id"), userId);
+    if (!q.exec()) {
+        if (err) *err = QStringLiteral("查询未结算订单失败: %1").arg(q.lastError().text());
+        return false;
     }
+    if (!q.next())
+        return false;   // 没有未结算订单
+    if (out)
+        fillOrder(q, *out);
     return true;
 }
 
@@ -54,31 +87,20 @@ QVector<DBManager::Order> DBManager::listOrders(qint64 userId) const
     QVector<Order> result;
     QSqlQuery q(db());
     if (userId < 0) {
-        q.exec(QStringLiteral(
-            "SELECT order_id, order_no, user_id, station_id, charger_id, status,"
-            "       energy, amount, start_time, end_time"
-            " FROM charging_order ORDER BY order_id DESC;"));
+        q.exec(QString::fromLatin1(kOrderCols)
+               + QStringLiteral("ORDER BY o.order_id DESC;"));
     } else {
         // idx_order_user / idx_order_user_status 索引加速该查询
-        q.prepare(QStringLiteral(
-            "SELECT order_id, order_no, user_id, station_id, charger_id, status,"
-            "       energy, amount, start_time, end_time"
-            " FROM charging_order WHERE user_id = :id ORDER BY order_id DESC;"));
+        q.prepare(QString::fromLatin1(kOrderCols)
+                  + QStringLiteral("WHERE o.user_id = :id ORDER BY o.order_id DESC;"));
         q.bindValue(QStringLiteral(":id"), userId);
         q.exec();
     }
+    if (q.lastError().isValid())
+        return result;
     while (q.next()) {
         Order o;
-        o.orderId = q.value(0).toLongLong();
-        o.orderNo = q.value(1).toString();
-        o.userId = q.value(2).toLongLong();
-        o.stationId = q.value(3).toLongLong();
-        o.chargerId = q.value(4).toLongLong();
-        o.status = q.value(5).toInt();
-        o.energy = q.value(6).toDouble();
-        o.amount = q.value(7).toDouble();
-        o.startTime = q.value(8).toString();
-        o.endTime = q.value(9).toString();
+        fillOrder(q, o);
         result.append(o);
     }
     return result;
