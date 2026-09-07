@@ -23,7 +23,9 @@ namespace {
 
 const QString kDefaultDbName = QStringLiteral("charge_platform.db");
 
-// 读取一个 SQL 资源文件并逐条执行(每条以 ';' 结尾; 去掉整行 '--' 注释)
+// 读取一个 SQL 资源文件并逐条执行
+// 规则: 每条语句以 ';' 结尾; 先逐行剥掉 '--' 注释(含行内注释), 再按 ';' 切分,
+// 这样注释里即使出现分号也不会干扰切分。
 bool execResource(QSqlQuery &q, const QString &resPath, QString *err)
 {
     QFile f(resPath);
@@ -33,18 +35,25 @@ bool execResource(QSqlQuery &q, const QString &resPath, QString *err)
     }
     const QString text = QString::fromUtf8(f.readAll());
 
+    // 1) 逐行去掉注释
+    QStringList lines = text.split(QLatin1Char('\n'));
+    QStringList kept;
+    for (const QString &line : lines) {
+        QString l = line;
+        const int c = l.indexOf(QStringLiteral("--"));
+        if (c >= 0)
+            l = l.left(c);          // 去掉行内 "--" 及其后内容
+        if (!l.trimmed().isEmpty())
+            kept << l;
+    }
+
+    // 2) 按 ';' 切分成一条条语句
     QStringList statements;
-    for (const QString &chunk : text.split(QLatin1Char(';'))) {
-        QString cleaned;
-        const QStringList lines = chunk.split(QLatin1Char('\n'));
-        for (const QString &line : lines) {
-            if (line.trimmed().startsWith(QStringLiteral("--")))
-                continue;               // 去掉注释行
-            cleaned += line + QLatin1Char('\n');
-        }
-        cleaned = cleaned.trimmed();
-        if (!cleaned.isEmpty())
-            statements.append(cleaned);
+    const QString joined = kept.join(QLatin1Char('\n'));
+    for (const QString &chunk : joined.split(QLatin1Char(';'))) {
+        const QString stmt = chunk.trimmed();
+        if (!stmt.isEmpty())
+            statements << stmt;
     }
 
     for (const QString &stmt : statements) {
@@ -360,7 +369,26 @@ bool DBManager::applyMigrations(int fromVersion, QString *err)
         fromVersion = 5;
     }
 
-    // 以后新迁移照此继续加: if (fromVersion < 6) {... 执行 /db/migrations/006_*.sql ...}
+    // 迁移 6: user 补 debt(未结清欠费), 并把旧订单欠费并入用户欠费
+    if (fromVersion < 6) {
+        if (!beginTransaction())
+            return fail(QStringLiteral("迁移6: 开启事务失败"));
+        QSqlQuery q(db());
+        QString migErr;
+        if (!execResource(q, QStringLiteral(":/db/migrations/006_add_user_debt.sql"),
+                          &migErr)) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移6: %1").arg(migErr));
+        }
+        if (!writeSchemaVersion(6) || !commitTransaction()) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移6: 提交失败"));
+        }
+        qDebug() << "数据库迁移 6 完成(user.debt 未结清欠费)。";
+        fromVersion = 6;
+    }
+
+    // 以后新迁移照此继续加: if (fromVersion < 7) {... 执行 /db/migrations/007_*.sql ...}
     return true;
 }
 

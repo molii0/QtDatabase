@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
     QSqlQuery q(db.db());
     q.exec(QStringLiteral("SELECT MAX(version) FROM schema_version;"));
     if (q.next()) version = q.value(0).toInt();
-    CHECK(version >= 5, QStringLiteral("schema_version = %1").arg(version));
+    CHECK(version >= 6, QStringLiteral("schema_version = %1").arg(version));
 
     q.exec(QStringLiteral(
         "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'uq_%' ORDER BY name;"));
@@ -156,40 +156,79 @@ int main(int argc, char *argv[])
     db.getCharger(idle.chargerId, &after);
     CHECK(after.status == ChargerIdle, QStringLiteral("电桩已释放为空闲"));
 
-    // ---------------- BR-06: 余额不足也能结算(扣到0并记欠费) ----------------
+    // ---------------- BR-04/BR-06 闭环: 起充金额、欠费禁充、充值先还款 ----------------
     {
         DBManager::User poor;
         CHECK(db.insertUser(QStringLiteral("13900000009"), QStringLiteral("欠费用户")),
-              QStringLiteral("注册余额为 0 的用户"));
+              QStringLiteral("注册新用户"));
         db.getUserByPhone(QStringLiteral("13900000009"), &poor);
-        CHECK(qAbs(poor.balance - 0.0) < 0.001, QStringLiteral("新用户余额为 0"));
 
-        // 找一台"空闲且是快充"的桩(快充能在 1 秒多产生 >0 的费用)
+        // ① BR-04: 余额不足起充金额(5元)不能下单
+        QString errDebt;
+        DBManager::Charger anyIdle;
+        const QVector<DBManager::Charger> chargers0 = db.listChargers();
+        for (const DBManager::Charger &c : chargers0) {
+            if (c.status == ChargerIdle) { anyIdle = c; break; }
+        }
+        CHECK(anyIdle.chargerId != 0 && !db.orderConnect(poor.userId, anyIdle.chargerId, nullptr, &errDebt)
+                  && errDebt.contains(QStringLiteral("起充")),
+              QStringLiteral("余额<起充金额被拒(BR-04): %1").arg(errDebt));
+
+        // ② 给 5 元起充下单并开始, 再模拟"充电中把余额花光"
+        CHECK(db.updateBalance(poor.userId, 5.0), QStringLiteral("充值到 5 元"));
         DBManager::Charger fast;
         const QVector<DBManager::Charger> chargers = db.listChargers();
         for (const DBManager::Charger &c : chargers) {
             if (c.status == ChargerIdle && c.power >= 100.0) { fast = c; break; }
         }
-        CHECK(fast.chargerId != 0, QStringLiteral("存在空闲快充桩"));
-
         qint64 poorOrder = 0;
         CHECK(db.orderConnect(poor.userId, fast.chargerId, &poorOrder, &e)
                   && db.orderStart(poorOrder, &e),
-              QStringLiteral("0 余额用户下单并开始充电"));
+              QStringLiteral("余额 5 元下单并开始充电"));
+        CHECK(db.updateBalance(poor.userId, -5.0), QStringLiteral("(模拟)充电中余额被花光"));
         QThread::msleep(1200);
+
+        // ③ BR-06: 余额不足也能结算 -> 实扣0, 欠费=应付, 并累计到 user.debt
         CHECK(db.orderFinish(poorOrder, &e),
               QStringLiteral("余额不足结算不应被拒(BR-06): %1").arg(e));
-
         DBManager::Order poorDone;
         db.getOrderById(poorOrder, &poorDone);
-        CHECK(poorDone.status == OrderFinished
-                  && poorDone.amount > 0
+        CHECK(poorDone.status == OrderFinished && poorDone.amount > 0
                   && poorDone.paid == 0.0
                   && qAbs(poorDone.debt - poorDone.amount) < 0.001,
-              QStringLiteral("订单完成, 实扣=0, 欠费=应付(应付 %1, 欠费 %2)")
+              QStringLiteral("订单完成: 应付 %1, 实扣 0, 欠费 %2")
                   .arg(poorDone.amount, 0, 'f', 2).arg(poorDone.debt, 0, 'f', 2));
         db.getUserById(poor.userId, &poor);
-        CHECK(qAbs(poor.balance - 0.0) < 0.001, QStringLiteral("用户余额被扣到 0"));
+        CHECK(qAbs(poor.balance) < 0.001 && qAbs(poor.debt - poorDone.debt) < 0.001,
+              QStringLiteral("余额=0, 未结清欠费= %1").arg(poor.debt, 0, 'f', 2));
+
+        // ④ 欠费禁充: 有未结清欠费再下单被拒
+        DBManager::Charger fast2;
+        for (const DBManager::Charger &c : chargers) {
+            if (c.status == ChargerIdle && c.power >= 100.0 && c.chargerId != fast.chargerId) {
+                fast2 = c; break;
+            }
+        }
+        errDebt.clear();
+        if (fast2.chargerId) {
+            CHECK(!db.orderConnect(poor.userId, fast2.chargerId, nullptr, &errDebt)
+                      && errDebt.contains(QStringLiteral("欠费")),
+                  QStringLiteral("有欠费再下单被拒: %1").arg(errDebt));
+        }
+
+        // ⑤ 充值先还款: 还清欠费后余额 >= 起充, 可再次下单
+        double repay = 0.0, remain = -1.0;
+        const double topUp = poor.debt + 5.0;
+        CHECK(db.recharge(poor.userId, topUp, &repay, &remain, &e),
+              QStringLiteral("充值 %1 元(先还欠费)").arg(topUp));
+        db.getUserById(poor.userId, &poor);
+        CHECK(qAbs(repay - poorDone.debt) < 0.001 && remain <= 0.001
+                  && poor.debt <= 0.001 && qAbs(poor.balance - 5.0) < 0.001,
+              QStringLiteral("还款 %1 元, 剩余欠费 %2, 余额 %3")
+                  .arg(repay, 0, 'f', 2).arg(poor.debt, 0, 'f', 2).arg(poor.balance, 0, 'f', 2));
+        CHECK(db.orderConnect(poor.userId, fast.chargerId, &poorOrder, &e),
+              QStringLiteral("还清欠费后可以再次下单"));
+        db.orderCancel(poorOrder, &e);   // 清理
     }
 
     // ---------------- 统计 ----------------

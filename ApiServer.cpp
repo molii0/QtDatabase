@@ -268,6 +268,7 @@ QJsonObject ApiServer::userJson(const DBManager::User &u) const
     o[QStringLiteral("nickname")] = u.nickname;
     o[QStringLiteral("avatar")] = u.avatar;
     o[QStringLiteral("balance")] = u.balance;
+    o[QStringLiteral("debt")] = u.debt;
     o[QStringLiteral("status")] = u.status;         // 1=正常 0=冻结
     o[QStringLiteral("statusText")] = u.status == 1 ? QStringLiteral("正常") : QStringLiteral("冻结");
     o[QStringLiteral("registerTime")] = u.registerTime;
@@ -562,14 +563,19 @@ QHttpServerResponse ApiServer::onRecharge(const QHttpServerRequest &req)
     if (amount <= 0)
         return jsonError(400, QStringLiteral("充值金额必须大于 0"));
 
+    // 充值: 先还欠费(user.debt), 剩余进入余额
     DBManager::User u;
     if (!m_db.getUserById(userId, &u))
         return jsonError(404, QStringLiteral("用户不存在"));
-    if (!m_db.updateBalance(userId, amount))
-        return jsonError(500, QStringLiteral("充值失败"));
+    double repay = 0.0, remainDebt = 0.0;
+    QString err;
+    if (!m_db.recharge(userId, amount, &repay, &remainDebt, &err))
+        return jsonError(dbErrorStatus(err), err);
     m_db.getUserById(userId, &u);
     QJsonObject data;
     data[QStringLiteral("user")] = userJson(u);
+    data[QStringLiteral("repayAmount")] = repay;        // 本次还掉的欠费
+    data[QStringLiteral("remainingDebt")] = remainDebt; // 还完后剩余欠费
     return jsonOk(data);
 }
 

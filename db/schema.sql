@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS user (
     avatar        TEXT    NOT NULL DEFAULT '',
     balance       REAL    NOT NULL DEFAULT 0,
     status        INTEGER NOT NULL DEFAULT 1,
-    register_time TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+    register_time TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+    debt          REAL    NOT NULL DEFAULT 0   -- 未结清欠费(元, BR-06/欠费禁充)
 );
 
 -- 管理员表

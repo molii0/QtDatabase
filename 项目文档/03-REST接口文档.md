@@ -21,10 +21,10 @@
 
 | 对象 | 字段 |
 | --- | --- |
-| user | userId, phone, nickname, **avatar**, balance, status, statusText, registerTime |
+| user | userId, phone, nickname, **avatar**, balance, **debt(未结清欠费)**, status, statusText, registerTime |
 | station | stationId, name, codePrefix, address, longitude, latitude, price, totalChargers, idleChargers, connectedChargers, chargingChargers, faultChargers, **onlineRate**(%)，附近电站另有 **distanceKm** |
 | charger | chargerId, stationId, code, type, typeText, power, status, statusText |
-| order | orderId, orderNo, userId, userPhone, stationId, **stationName**, chargerId, **chargerCode**, status, statusText, energy, amount, startTime, endTime |
+| order | orderId, orderNo, userId, userPhone, stationId, **stationName**, chargerId, **chargerCode**, status, statusText, energy, amount, **paid(实扣)**, **debt(欠费)**, startTime, endTime |
 
 ---
 
@@ -55,7 +55,8 @@
 ### 5. 选桩下单（订单→待支付，电桩→已连接）
 `POST /api/charges`　body:`{"chargerId":2}`（userId 取自 token，可不传）
 → `201 {"order":order 对象}`
-错误：409 已有未结算订单(BR-02)/电桩被占用/故障；403 冻结。
+前置规则：**有未结清欠费(debt>0)禁止下单**；**余额需 ≥ 起充金额(默认 5 元)**(BR-04)。
+错误：409 欠费禁充/余额不足(起充)/已有未结算订单(BR-02)/电桩被占用/故障；403 冻结。
 
 ### 6. 开始充电
 `POST /api/charges/{orderId}/start`
@@ -63,8 +64,10 @@
 
 ### 7. 结束充电并结算
 `POST /api/charges/{orderId}/finish`（**充电时长需 >0 秒**，结束太快要稍等）
-→ `200 {order}`（status=2，含 energy/amount/endTime/stationName/chargerCode）
-错误：409 余额不足/时长不足/状态不允许；404/403 同上。
+→ `200 {order}`（status=2，含 energy/amount/**paid/debt**/endTime/stationName/chargerCode）
+结算规则(BR-06)：余额充足时 paid=amount、debt=0；**余额不足也能正常结束**——
+把余额扣到 0，差额 amount-paid 记为该订单欠费 debt，并**累加到用户未结清欠费 user.debt**（欠费禁充用）。
+错误：409 时长不足/状态不允许；404/403 同上（余额不足不再是错误）。
 
 ### 8. 取消订单（仅未开始的）
 `DELETE /api/charges/{orderId}`
@@ -74,9 +77,12 @@
 `GET /api/users/{userId}/orders`
 → `200 {"orders":[order 对象...]}`（含站名/桩号/手机号，倒序）
 
-### 10. 充值
+### 10. 充值（先还欠费，剩余进余额）
 `POST /api/users/{userId}/recharge`　body:`{"amount":100}`
-→ `200 {"user":user 对象}`（含最新余额）；错误：400 金额非法、404 用户不存在。
+→ `200 {"user":user 对象, "repayAmount":本次还款, "remainingDebt":剩余欠费}`
+规则：有未结清欠费时，充值金额**先用于还款**，多余部分才进入余额；
+还清欠费且余额 ≥ 起充金额(5 元)后才能再次下单。
+错误：400 金额非法、404 用户不存在。
 
 ### 11. 修改资料（昵称/头像）
 `PUT /api/users/{userId}/profile`　body:`{"nickname":"新昵称","avatar":"avatars/1.png"}`（都可选，至少给一个；avatar 为空串=清除头像）
@@ -182,5 +188,5 @@
 
 已实现：用户端 12 个（登录/电站/附近电站/电桩/下单/开始/结算/取消/订单/充值/资料/未结算查询），
 管理端 16 个（登录/退出/用户管理/统计 4 类/电站桩管理/运维日志）。
-预留（按需再加）：预约超时自动释放、欠费记录(BR-06)、真实图片上传(目前头像只存相对路径)、
-设备心跳/告警、微信支付/发票/收藏等。
+预留（按需再加）：预约超时自动释放、真实图片上传(目前头像只存相对路径)、
+设备心跳/告警、微信支付/发票/收藏等。欠费记录(BR-06)已实现：余额不足时订单记录 debt。

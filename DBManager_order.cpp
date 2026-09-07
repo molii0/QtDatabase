@@ -168,12 +168,26 @@ bool DBManager::orderConnect(qint64 userId, qint64 chargerId, qint64 *newOrderId
 
     // 用户校验(存在 / 未冻结)
     QSqlQuery q(dbc);
-    q.prepare(QStringLiteral("SELECT status FROM user WHERE user_id = :id;"));
+    q.prepare(QStringLiteral("SELECT status, balance, debt FROM user WHERE user_id = :id;"));
     q.bindValue(QStringLiteral(":id"), userId);
     if (!q.exec() || !q.next())
         return rollbackAndFail(QStringLiteral("用户不存在 (userId=%1)").arg(userId));
-    if (q.value(0).toInt() == 0)
+    const int userStatus = q.value(0).toInt();
+    const double userBalance = q.value(1).toDouble();
+    const double userDebt = q.value(2).toDouble();
+    if (userStatus == 0)
         return rollbackAndFail(QStringLiteral("账号已被冻结，不能下单充电"));
+
+    // 欠费禁充: 有未结清欠费的用户必须先还款才能再次充电(BR-06 闭环)
+    if (userDebt > 0.005)
+        return rollbackAndFail(QStringLiteral("您有未结清欠费 %1 元，请先充值还款后再充电")
+                                   .arg(userDebt, 0, 'f', 2));
+
+    // BR-04: 开始充电前余额必须 ≥ 最低起充金额(默认 5 元), 避免 0 元无限欠费
+    constexpr double kStartBalance = 5.0;
+    if (userBalance < kStartBalance)
+        return rollbackAndFail(QStringLiteral("余额不足：起充需 %1 元，请先充值")
+                                   .arg(kStartBalance, 0, 'f', 2));
 
     // BR-02: 同一用户已有未结算订单(待支付0/充电中1)时不允许再下单
     q.prepare(QStringLiteral(
@@ -392,17 +406,20 @@ bool DBManager::orderFinish(qint64 orderId, QString *err)
     qDebug() << "结算: 时长" << durationSecs / 60 << "分钟,"
              << "电量" << energy << "度, 费用" << amount << "元";
 
-    // 3. 读取用户余额, 计算"实扣/欠费"(BR-06):
+    // 3. 读取用户余额/未结清欠费, 计算"实扣/欠费"(BR-06):
     //    余额充足 -> 全额扣款, 欠费 0;
-    //    余额不足 -> 把余额扣到 0, 差额 amount-balance 记为该订单的欠费(debt)。
+    //    余额不足 -> 把余额扣到 0, 差额 amount-balance:
+    //      记到该订单(debt)供小票展示, 同时累加进 user.debt(未结清欠费, 欠费禁充)。
     QSqlQuery balanceQuery(dbc);
-    balanceQuery.prepare(QStringLiteral("SELECT balance FROM user WHERE user_id = :uid;"));
+    balanceQuery.prepare(QStringLiteral("SELECT balance, debt FROM user WHERE user_id = :uid;"));
     balanceQuery.bindValue(QStringLiteral(":uid"), userId);
     if (!balanceQuery.exec() || !balanceQuery.next())
         return rollbackAndFail(QStringLiteral("查询用户余额失败"));
     const double userBalance = balanceQuery.value(0).toDouble();
+    const double oldUserDebt = balanceQuery.value(1).toDouble();
     const double paid = qMin(amount, userBalance);          // 实际扣款(元)
     const double debt = round2(amount - paid);              // 欠费(元) = 应付 - 实扣
+    const double newUserDebt = round2(oldUserDebt + debt);  // 未结清欠费累计
     qDebug() << "结算: 时长" << durationSecs / 60 << "分钟,"
              << "电量" << energy << "度, 应付" << amount << "元,"
              << "实扣" << paid << "元, 欠费" << debt << "元";
@@ -429,11 +446,13 @@ bool DBManager::orderFinish(qint64 orderId, QString *err)
         return rollbackAndFail(QStringLiteral("写入订单结果失败: %1").arg(updateOrder.lastError().text()));
     }
 
-    // 5. 扣用户余额(只扣"实扣"部分; paid <= 余额, 扣后余额 ≥ 0)
+    // 5. 扣用户余额(只扣"实扣"), 并把差额累加进未结清欠费 user.debt
     QSqlQuery updateUser(dbc);
     updateUser.prepare(QStringLiteral(
-        "UPDATE user SET balance = balance - :pd WHERE user_id = :uid AND balance >= :pd;"));
+        "UPDATE user SET balance = balance - :pd, debt = :nd"
+        " WHERE user_id = :uid AND balance >= :pd;"));
     updateUser.bindValue(QStringLiteral(":pd"), paid);
+    updateUser.bindValue(QStringLiteral(":nd"), newUserDebt);
     updateUser.bindValue(QStringLiteral(":uid"), userId);
     if (!updateUser.exec() || updateUser.numRowsAffected() != 1) {
         rollbackTransaction();

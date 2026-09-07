@@ -41,6 +41,7 @@ public:
         QString nickname;
         QString avatar;         // 头像(相对路径/文件名, 空串=默认灰头像)
         double  balance = 0.0;  // 钱包余额(元)
+        double  debt = 0.0;     // 未结清欠费(元, >0 时禁止下单充电)
         int     status = 1;     // 1=正常 0=冻结
         QString registerTime;   // 注册时间
     };
@@ -148,7 +149,11 @@ public:
     bool getUserById(qint64 userId, User *out = nullptr) const;      // 按 id 查, 返回是否存在
     bool listUsers(const QString &phoneKeyword, QVector<User> *out) const;  // 管理端用户列表(支持模糊)
     bool setUserStatus(qint64 userId, bool frozen, QString *err = nullptr); // 冻结/解冻
-    bool updateBalance(qint64 userId, double delta);                 // 余额增减(充值正数/扣费负数)
+    bool updateBalance(qint64 userId, double delta);                 // 余额增减(内部/通用原语)
+    // 充值(推荐接口): 先还清欠费(debt), 剩余金额进入余额; 返回本次还款/剩余欠费
+    bool recharge(qint64 userId, double amount,
+                  double *repayOut = nullptr, double *remainDebtOut = nullptr,
+                  QString *err = nullptr);
     bool updateNickname(qint64 userId, const QString &nickname, QString *err = nullptr); // 改昵称
     bool updateAvatar(qint64 userId, const QString &avatar, QString *err = nullptr);     // 设置头像(相对路径)
 
@@ -225,8 +230,8 @@ private:
     static QString nowStr();    // 当前本地时间 "yyyy-MM-dd HH:mm:ss"
     static double round2(double v);   // 金额/电量保留 2 位小数
 
-    static constexpr int kSchemaVersion = 5;    // 当前数据库结构版本
-    // v3: BR-02/03 唯一索引+扩展表; v4: user.avatar; v5: 订单 paid/debt(BR-06 欠费结算)
+    static constexpr int kSchemaVersion = 6;    // 当前数据库结构版本
+    // v5: 订单 paid/debt; v6: user.debt(未结清欠费)+充值先还款+欠费禁充(BR-04/BR-06 闭环)
 
     QString m_dbPath;
     mutable QMutex m_openMutex; // 保护"每个线程首次建连接"的并发
