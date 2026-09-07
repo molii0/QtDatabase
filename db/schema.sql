@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS charging_order (
     status     INTEGER NOT NULL DEFAULT 0,
     energy     REAL    NOT NULL DEFAULT 0,
     amount     REAL    NOT NULL DEFAULT 0,
+    paid       REAL    NOT NULL DEFAULT 0,
+    debt       REAL    NOT NULL DEFAULT 0,
     start_time TEXT,
     end_time   TEXT,
     created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))

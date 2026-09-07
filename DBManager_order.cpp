@@ -27,7 +27,7 @@ QString DBManager::makeOrderNo()
 // 订单查询公共列(JION 出站名/桩号/手机号, 供列表与小票展示)
 static const char kOrderCols[] =
     "SELECT o.order_id, o.order_no, o.user_id, o.station_id, o.charger_id, o.status,"
-    "       o.energy, o.amount, o.start_time, o.end_time,"
+    "       o.energy, o.amount, o.paid, o.debt, o.start_time, o.end_time,"
     "       s.name, c.code, u.phone"
     "  FROM charging_order o"
     "  JOIN station s ON s.station_id = o.station_id"
@@ -44,11 +44,13 @@ static void fillOrder(QSqlQuery &q, DBManager::Order &o)
     o.status = q.value(5).toInt();
     o.energy = q.value(6).toDouble();
     o.amount = q.value(7).toDouble();
-    o.startTime = q.value(8).toString();
-    o.endTime = q.value(9).toString();
-    o.stationName = q.value(10).toString();
-    o.chargerCode = q.value(11).toString();
-    o.userPhone = q.value(12).toString();
+    o.paid = q.value(8).toDouble();
+    o.debt = q.value(9).toDouble();
+    o.startTime = q.value(10).toString();
+    o.endTime = q.value(11).toString();
+    o.stationName = q.value(12).toString();
+    o.chargerCode = q.value(13).toString();
+    o.userPhone = q.value(14).toString();
 }
 
 bool DBManager::getOrderById(qint64 orderId, Order *out) const
@@ -336,7 +338,8 @@ bool DBManager::orderCancel(qint64 orderId, QString *err)
 }
 
 // ---------------- 4. 结束充电并结算(事务) ----------------
-// 按实际充电时长算费用 -> 校验余额 -> 扣款 -> 订单[充电中->已完成] -> 电桩[充电中->空闲]
+// 按实际充电时长算费用 -> 读余额算"实扣/欠费"(BR-06: 不足扣到0并记欠费)
+// -> 订单[充电中->已完成] 写 amount/paid/debt -> 扣款 -> 电桩[充电中->空闲]
 bool DBManager::orderFinish(qint64 orderId, QString *err)
 {
     if (err)
@@ -389,19 +392,22 @@ bool DBManager::orderFinish(qint64 orderId, QString *err)
     qDebug() << "结算: 时长" << durationSecs / 60 << "分钟,"
              << "电量" << energy << "度, 费用" << amount << "元";
 
-    // 3. 校验余额是否够扣(不够就整体回滚, 提示先充值)
+    // 3. 读取用户余额, 计算"实扣/欠费"(BR-06):
+    //    余额充足 -> 全额扣款, 欠费 0;
+    //    余额不足 -> 把余额扣到 0, 差额 amount-balance 记为该订单的欠费(debt)。
     QSqlQuery balanceQuery(dbc);
     balanceQuery.prepare(QStringLiteral("SELECT balance FROM user WHERE user_id = :uid;"));
     balanceQuery.bindValue(QStringLiteral(":uid"), userId);
     if (!balanceQuery.exec() || !balanceQuery.next())
         return rollbackAndFail(QStringLiteral("查询用户余额失败"));
     const double userBalance = balanceQuery.value(0).toDouble();
-    if (userBalance < amount)
-        return rollbackAndFail(QStringLiteral("用户余额不足(当前 %1 元, 需 %2 元)，请先充值")
-                                   .arg(userBalance, 0, 'f', 2)
-                                   .arg(amount, 0, 'f', 2));
+    const double paid = qMin(amount, userBalance);          // 实际扣款(元)
+    const double debt = round2(amount - paid);              // 欠费(元) = 应付 - 实扣
+    qDebug() << "结算: 时长" << durationSecs / 60 << "分钟,"
+             << "电量" << energy << "度, 应付" << amount << "元,"
+             << "实扣" << paid << "元, 欠费" << debt << "元";
 
-    // 4. 订单 充电中 -> 已完成, 写入电量/费用/结束时间
+    // 4. 订单 充电中 -> 已完成, 写入电量/应付/实扣/欠费/结束时间
     QString stErr;
     if (!orderSetState(dbc, orderId, OrderCharging, OrderFinished, &stErr)) {
         rollbackTransaction();
@@ -410,10 +416,12 @@ bool DBManager::orderFinish(qint64 orderId, QString *err)
     }
     QSqlQuery updateOrder(dbc);
     updateOrder.prepare(QStringLiteral(
-        "UPDATE charging_order SET energy = :en, amount = :am, end_time = :et"
+        "UPDATE charging_order SET energy = :en, amount = :am, paid = :pd, debt = :db, end_time = :et"
         " WHERE order_id = :id AND status = 2;"));
     updateOrder.bindValue(QStringLiteral(":en"), energy);
     updateOrder.bindValue(QStringLiteral(":am"), amount);
+    updateOrder.bindValue(QStringLiteral(":pd"), paid);
+    updateOrder.bindValue(QStringLiteral(":db"), debt);
     updateOrder.bindValue(QStringLiteral(":et"), nowStr());
     updateOrder.bindValue(QStringLiteral(":id"), orderId);
     if (!updateOrder.exec()) {
@@ -421,11 +429,11 @@ bool DBManager::orderFinish(qint64 orderId, QString *err)
         return rollbackAndFail(QStringLiteral("写入订单结果失败: %1").arg(updateOrder.lastError().text()));
     }
 
-    // 5. 扣用户余额
+    // 5. 扣用户余额(只扣"实扣"部分; paid <= 余额, 扣后余额 ≥ 0)
     QSqlQuery updateUser(dbc);
     updateUser.prepare(QStringLiteral(
-        "UPDATE user SET balance = balance - :am WHERE user_id = :uid AND balance >= :am;"));
-    updateUser.bindValue(QStringLiteral(":am"), amount);
+        "UPDATE user SET balance = balance - :pd WHERE user_id = :uid AND balance >= :pd;"));
+    updateUser.bindValue(QStringLiteral(":pd"), paid);
     updateUser.bindValue(QStringLiteral(":uid"), userId);
     if (!updateUser.exec() || updateUser.numRowsAffected() != 1) {
         rollbackTransaction();
@@ -443,6 +451,6 @@ bool DBManager::orderFinish(qint64 orderId, QString *err)
         rollbackTransaction();
         return rollbackAndFail(QStringLiteral("提交事务失败"));
     }
-    qDebug() << "订单" << orderId << "结算成功, 消费" << amount << "元";
+    qDebug() << "订单" << orderId << "结算成功, 实扣" << paid << "元, 欠费" << debt << "元";
     return true;
 }

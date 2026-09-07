@@ -336,6 +336,8 @@ QJsonObject ApiServer::orderJson(const DBManager::Order &o) const
     j[QStringLiteral("statusText")] = orderStateText(o.status);
     j[QStringLiteral("energy")] = o.energy;
     j[QStringLiteral("amount")] = o.amount;
+    j[QStringLiteral("paid")] = o.paid;
+    j[QStringLiteral("debt")] = o.debt;
     j[QStringLiteral("startTime")] = o.startTime;
     j[QStringLiteral("endTime")] = o.endTime;
     return j;

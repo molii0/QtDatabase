@@ -6,5 +6,6 @@
         <file alias="migrations/002_charger_status_remap.sql">db/migrations/002_charger_status_remap.sql</file>
         <file alias="migrations/003_clean_duplicate_orders.sql">db/migrations/003_clean_duplicate_orders.sql</file>
         <file alias="migrations/004_add_user_avatar.sql">db/migrations/004_add_user_avatar.sql</file>
+        <file alias="migrations/005_add_order_paid_debt.sql">db/migrations/005_add_order_paid_debt.sql</file>
     </qresource>
 </RCC>

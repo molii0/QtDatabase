@@ -341,7 +341,26 @@ bool DBManager::applyMigrations(int fromVersion, QString *err)
         fromVersion = 4;
     }
 
-    // 以后新迁移照此继续加: if (fromVersion < 5) {... 执行 /db/migrations/005_*.sql ...}
+    // 迁移 5: charging_order 补 paid/debt(BR-06 余额不足允许结算并记欠费)
+    if (fromVersion < 5) {
+        if (!beginTransaction())
+            return fail(QStringLiteral("迁移5: 开启事务失败"));
+        QSqlQuery q(db());
+        QString migErr;
+        if (!execResource(q, QStringLiteral(":/db/migrations/005_add_order_paid_debt.sql"),
+                          &migErr)) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移5: %1").arg(migErr));
+        }
+        if (!writeSchemaVersion(5) || !commitTransaction()) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移5: 提交失败"));
+        }
+        qDebug() << "数据库迁移 5 完成(订单 paid/debt)。";
+        fromVersion = 5;
+    }
+
+    // 以后新迁移照此继续加: if (fromVersion < 6) {... 执行 /db/migrations/006_*.sql ...}
     return true;
 }
 

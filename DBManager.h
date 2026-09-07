@@ -76,6 +76,8 @@ public:
         int     status = OrderWaitPay;  // 见 ChargeState.h
         double  energy = 0.0;   // 充电电量(度)
         double  amount = 0.0;   // 充电费用(元)
+        double  paid = 0.0;     // 实际扣款(元) = min(amount, 当时余额)
+        double  debt = 0.0;     // 欠费金额(元, BR-06): amount - paid
         QString startTime;      // 开始充电时间
         QString endTime;        // 结束时间
         // 下面是查询时 JOIN 出来的展示字段(小票/列表用), 非表字段
@@ -223,8 +225,8 @@ private:
     static QString nowStr();    // 当前本地时间 "yyyy-MM-dd HH:mm:ss"
     static double round2(double v);   // 金额/电量保留 2 位小数
 
-    static constexpr int kSchemaVersion = 4;    // 当前数据库结构版本
-    // v3: BR-02/03 唯一索引 + ops_log/load_prediction/recharge_log 表; v4: user.avatar 字段
+    static constexpr int kSchemaVersion = 5;    // 当前数据库结构版本
+    // v3: BR-02/03 唯一索引+扩展表; v4: user.avatar; v5: 订单 paid/debt(BR-06 欠费结算)
 
     QString m_dbPath;
     mutable QMutex m_openMutex; // 保护"每个线程首次建连接"的并发

@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
     QSqlQuery q(db.db());
     q.exec(QStringLiteral("SELECT MAX(version) FROM schema_version;"));
     if (q.next()) version = q.value(0).toInt();
-    CHECK(version >= 3, QStringLiteral("schema_version = %1").arg(version));
+    CHECK(version >= 5, QStringLiteral("schema_version = %1").arg(version));
 
     q.exec(QStringLiteral(
         "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'uq_%' ORDER BY name;"));
@@ -155,6 +155,42 @@ int main(int argc, char *argv[])
     DBManager::Charger after;
     db.getCharger(idle.chargerId, &after);
     CHECK(after.status == ChargerIdle, QStringLiteral("电桩已释放为空闲"));
+
+    // ---------------- BR-06: 余额不足也能结算(扣到0并记欠费) ----------------
+    {
+        DBManager::User poor;
+        CHECK(db.insertUser(QStringLiteral("13900000009"), QStringLiteral("欠费用户")),
+              QStringLiteral("注册余额为 0 的用户"));
+        db.getUserByPhone(QStringLiteral("13900000009"), &poor);
+        CHECK(qAbs(poor.balance - 0.0) < 0.001, QStringLiteral("新用户余额为 0"));
+
+        // 找一台"空闲且是快充"的桩(快充能在 1 秒多产生 >0 的费用)
+        DBManager::Charger fast;
+        const QVector<DBManager::Charger> chargers = db.listChargers();
+        for (const DBManager::Charger &c : chargers) {
+            if (c.status == ChargerIdle && c.power >= 100.0) { fast = c; break; }
+        }
+        CHECK(fast.chargerId != 0, QStringLiteral("存在空闲快充桩"));
+
+        qint64 poorOrder = 0;
+        CHECK(db.orderConnect(poor.userId, fast.chargerId, &poorOrder, &e)
+                  && db.orderStart(poorOrder, &e),
+              QStringLiteral("0 余额用户下单并开始充电"));
+        QThread::msleep(1200);
+        CHECK(db.orderFinish(poorOrder, &e),
+              QStringLiteral("余额不足结算不应被拒(BR-06): %1").arg(e));
+
+        DBManager::Order poorDone;
+        db.getOrderById(poorOrder, &poorDone);
+        CHECK(poorDone.status == OrderFinished
+                  && poorDone.amount > 0
+                  && poorDone.paid == 0.0
+                  && qAbs(poorDone.debt - poorDone.amount) < 0.001,
+              QStringLiteral("订单完成, 实扣=0, 欠费=应付(应付 %1, 欠费 %2)")
+                  .arg(poorDone.amount, 0, 'f', 2).arg(poorDone.debt, 0, 'f', 2));
+        db.getUserById(poor.userId, &poor);
+        CHECK(qAbs(poor.balance - 0.0) < 0.001, QStringLiteral("用户余额被扣到 0"));
+    }
 
     // ---------------- 统计 ----------------
     DBManager::RevenueSummary rev;
