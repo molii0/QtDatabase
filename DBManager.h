@@ -12,6 +12,7 @@
 //   DBManager_order.cpp  订单流程(orderConnect/orderStart/orderCancel/orderFinish)
 //   DBManager_stats.cpp  统计(营收汇总/按日营收/电桩状态分布)
 //   DBManager_seed.cpp   首次建库的演示数据
+//   DBManager_device.cpp 设备接入(遥测/心跳/命令通道, Charger Simulator 对接)
 //   ChargeState.h/.cpp   状态机: 充电桩/订单的状态枚举与合法转换校验
 //
 // 状态约定(与 ChargeState.h 一致):
@@ -129,6 +130,38 @@ public:
         QString createdAt;
     };
 
+    // ---------- 设备遥测帧(与 charger_telemetry 表对应, 设备层每秒上报) ----------
+    struct Telemetry {
+        qint64  telemetryId = 0;
+        qint64  chargerId = 0;
+        QString ts;             // 设备上报时间
+        QString status;         // 设备侧原始状态: idle/reserved/charging/finished/fault/offline
+        double  power = 0.0;    // 当前输出功率 kW
+        double  soc = 0.0;      // 电池电量 %
+        double  energy = 0.0;   // 本次充电累计电量 kWh
+        double  temperature = 0.0; // 设备温度 ℃
+    };
+
+    // ---------- 设备心跳(charger_heartbeat 表, 每桩一行) ----------
+    struct Heartbeat {
+        qint64  chargerId = 0;
+        QString lastSeen;       // 最后一次心跳时间
+        QString status;         // 心跳时的设备状态
+        qint64  uptimeS = 0;    // 设备已运行秒数
+    };
+
+    // ---------- 设备命令(device_command 表, Server->Device 通道) ----------
+    struct DeviceCommand {
+        qint64  commandId = 0;
+        qint64  chargerId = 0;
+        QString command;        // plug/start/stop/unplug/fault/recover/offline/online/restart
+        QString arg;            // 参数(如 fault 的故障码)
+        int     status = 0;     // 0待执行 1已执行 2执行失败
+        QString result;         // 设备回填的执行结果
+        QString createdAt;
+        QString doneAt;
+    };
+
     static DBManager& instance();
 
     // ---------------- 连接与初始化 ----------------
@@ -212,6 +245,28 @@ public:
                    const QString &action, const QString &detail = QString());
     bool listOpsLogs(int limit, QVector<OpsLog> *out, QString *err = nullptr) const;
 
+    // ---------------- 设备接入(Charger Simulator 经数据库层对接) ----------------
+    // 设备层的数据全部入库; 接口/界面等其他层一律经由数据库层读取, 不与设备直连。
+    // 遥测: 每帧追加写入(旧帧用 trimTelemetry 按桩裁剪)
+    bool insertTelemetry(const Telemetry &t, QString *err = nullptr);
+    bool trimTelemetry(qint64 chargerId, int keepRows, QString *err = nullptr);
+    // 心跳: 每桩一行 upsert; 平台按 now - last_seen 超过阈值(建议 15 秒)判定离线
+    bool upsertHeartbeat(const Heartbeat &h, QString *err = nullptr);
+    bool getHeartbeat(qint64 chargerId, Heartbeat *out = nullptr) const;
+    bool listHeartbeats(QVector<Heartbeat> *out, QString *err = nullptr) const;
+    // 设备状态投影到 charger.status(0空闲1已连接2充电中3故障):
+    // 该桩存在进行中订单(0/1)时跳过不写, 状态归订单流程负责
+    bool syncChargerDeviceStatus(qint64 chargerId, int status, QString *err = nullptr);
+    // 命令通道: 平台 pushDeviceCommand 下发; 设备 takePendingDeviceCommands 领取,
+    // 执行后 finishDeviceCommand 回填结果
+    bool pushDeviceCommand(qint64 chargerId, const QString &command, const QString &arg = QString(),
+                           qint64 *newCommandId = nullptr, QString *err = nullptr);
+    bool takePendingDeviceCommands(qint64 chargerId, QVector<DeviceCommand> *out,
+                                   QString *err = nullptr) const;
+    bool finishDeviceCommand(qint64 commandId, bool ok, const QString &result,
+                             QString *err = nullptr);
+    bool listDeviceCommands(int limit, QVector<DeviceCommand> *out, QString *err = nullptr) const;
+
 private:
     DBManager();
     ~DBManager();
@@ -230,8 +285,9 @@ private:
     static QString nowStr();    // 当前本地时间 "yyyy-MM-dd HH:mm:ss"
     static double round2(double v);   // 金额/电量保留 2 位小数
 
-    static constexpr int kSchemaVersion = 6;    // 当前数据库结构版本
+    static constexpr int kSchemaVersion = 7;    // 当前数据库结构版本
     // v5: 订单 paid/debt; v6: user.debt(未结清欠费)+充值先还款+欠费禁充(BR-04/BR-06 闭环)
+    // v7: 设备接入表 charger_telemetry/charger_heartbeat/device_command(模拟器对接)
 
     QString m_dbPath;
     mutable QMutex m_openMutex; // 保护"每个线程首次建连接"的并发

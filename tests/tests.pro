@@ -19,7 +19,8 @@ SOURCES += \
         ../DBManager_station.cpp \
         ../DBManager_order.cpp \
         ../DBManager_stats.cpp \
-        ../DBManager_seed.cpp
+        ../DBManager_seed.cpp \
+        ../DBManager_device.cpp
 
 HEADERS += \
         ../DBManager.h \

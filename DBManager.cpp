@@ -83,8 +83,17 @@ DBManager::~DBManager() = default;
 bool DBManager::init(const QString &dbFilePath)
 {
     QString path = dbFilePath;
-    if (path.isEmpty())
+    if (path.isEmpty()) {
+        // 无参数时的默认库文件位置:
+        //   - 两个产品(平台 QtDatabase / 模拟器 ChargerSimulator)在各自的 .pro 里
+        //     都定义了 DEFAULT_DB_DIR = 工程根目录, 保证它们共用同一个 charge_platform.db;
+        //   - 未定义宏的编译目标(如 tests 自检)退回"exe 所在目录"。
+#ifdef DEFAULT_DB_DIR
+        path = QDir(QString::fromLatin1(DEFAULT_DB_DIR)).filePath(kDefaultDbName);
+#else
         path = QDir(QCoreApplication::applicationDirPath()).filePath(kDefaultDbName);
+#endif
+    }
     m_dbPath = QDir::cleanPath(path);
 
     // 确保数据库所在目录存在
@@ -388,7 +397,26 @@ bool DBManager::applyMigrations(int fromVersion, QString *err)
         fromVersion = 6;
     }
 
-    // 以后新迁移照此继续加: if (fromVersion < 7) {... 执行 /db/migrations/007_*.sql ...}
+    // 迁移 7: 设备接入表(遥测/心跳/命令通道, Charger Simulator 对接)
+    if (fromVersion < 7) {
+        if (!beginTransaction())
+            return fail(QStringLiteral("迁移7: 开启事务失败"));
+        QSqlQuery q(db());
+        QString migErr;
+        if (!execResource(q, QStringLiteral(":/db/migrations/007_device_access.sql"),
+                          &migErr)) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移7: %1").arg(migErr));
+        }
+        if (!writeSchemaVersion(7) || !commitTransaction()) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移7: 提交失败"));
+        }
+        qDebug() << "数据库迁移 7 完成(设备接入表)。";
+        fromVersion = 7;
+    }
+
+    // 以后新迁移照此继续加: if (fromVersion < 8) {... 执行 /db/migrations/008_*.sql ...}
     return true;
 }
 

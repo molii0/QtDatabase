@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
     QSqlQuery q(db.db());
     q.exec(QStringLiteral("SELECT MAX(version) FROM schema_version;"));
     if (q.next()) version = q.value(0).toInt();
-    CHECK(version >= 6, QStringLiteral("schema_version = %1").arg(version));
+    CHECK(version >= 7, QStringLiteral("schema_version = %1").arg(version));
 
     q.exec(QStringLiteral(
         "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'uq_%' ORDER BY name;"));
@@ -66,9 +66,14 @@ int main(int argc, char *argv[])
               && uq.contains(QStringLiteral("uq_order_charger_active")),
           QStringLiteral("BR-02/03 唯一索引存在: %1").arg(uq.join(QLatin1Char(','))));
 
-    CHECK(rowCount(db, QStringLiteral("\"user\"")) == 5, QStringLiteral("种子用户 5 个"));
-    CHECK(rowCount(db, QStringLiteral("station")) == 5, QStringLiteral("种子电站 5 座"));
+    CHECK(rowCount(db, QStringLiteral("\"user\"")) == 50, QStringLiteral("种子用户 50 个"));
+    CHECK(rowCount(db, QStringLiteral("station")) == 50, QStringLiteral("种子电站 50 座"));
+    CHECK(rowCount(db, QStringLiteral("charger")) == 300, QStringLiteral("种子电桩 300 台"));
     CHECK(rowCount(db, QStringLiteral("ops_log")) >= 0, QStringLiteral("ops_log 表存在"));
+    CHECK(rowCount(db, QStringLiteral("charger_telemetry")) >= 0
+              && rowCount(db, QStringLiteral("charger_heartbeat")) >= 0
+              && rowCount(db, QStringLiteral("device_command")) >= 0,
+          QStringLiteral("设备接入表存在(v7)"));
 
     // ---------------- 用户 / 管理员 ----------------
     DBManager::User u;
@@ -100,7 +105,7 @@ int main(int argc, char *argv[])
 
     // ---------------- 电站 / 电桩管理 ----------------
     QVector<DBManager::Station> stations = db.listStations();
-    CHECK(stations.size() == 5, QStringLiteral("电站列表 5 座"));
+    CHECK(stations.size() == 50, QStringLiteral("电站列表 50 座"));
     qint64 stationId = 0;
     CHECK(db.addStation(QStringLiteral("测试电站"), QStringLiteral("CS"),
                         QStringLiteral("测试地址"), 123.0, 41.0, 1.1, &stationId, &e),
@@ -246,6 +251,105 @@ int main(int argc, char *argv[])
     QVector<DBManager::OpsLog> logs;
     CHECK(db.listOpsLogs(10, &logs, &serr) && !logs.isEmpty(),
           QStringLiteral("查询运维日志 %1 条").arg(logs.size()));
+
+    // ---------------- 设备接入(Charger Simulator 对接, v7) ----------------
+    // 造一台"干净"的桩给设备层测试: 新建测试站 + 单桩
+    qint64 devStationId = 0;
+    CHECK(db.addStation(QStringLiteral("设备测试电站"), QStringLiteral("DEV"),
+                        QStringLiteral("测试地址"), 123.0, 41.0, 1.0, &devStationId, &serr),
+          QStringLiteral("设备测试: 新建电站"));
+    CHECK(db.addCharger(devStationId, QStringLiteral("DEV-01"), 1, 60.0, &serr),
+          QStringLiteral("设备测试: 新建电桩 DEV-01"));
+    DBManager::Charger dev;
+    for (const DBManager::Charger &c : db.listChargers(devStationId)) {
+        if (c.code == QStringLiteral("DEV-01")) { dev = c; break; }
+    }
+    CHECK(dev.chargerId != 0, QStringLiteral("设备测试: 找到 DEV-01"));
+
+    // 遥测: 追加写入 + 按桩裁剪旧帧
+    DBManager::Telemetry tm;
+    tm.chargerId = dev.chargerId;
+    tm.ts = QStringLiteral("2026-09-07 10:00:00");
+    tm.status = QStringLiteral("charging");
+    tm.power = 60.0;
+    tm.soc = 33.3;
+    tm.energy = 1.25;
+    tm.temperature = 31.5;
+    CHECK(db.insertTelemetry(tm, &serr), QStringLiteral("遥测帧写入"));
+    DBManager::Telemetry tm2 = tm;
+    tm2.ts = QStringLiteral("2026-09-07 10:00:01");
+    tm2.soc = 33.8;
+    db.insertTelemetry(tm2, &serr);
+    CHECK(rowCount(db, QStringLiteral("charger_telemetry")) == 2,
+          QStringLiteral("遥测追加为 2 帧"));
+    CHECK(db.trimTelemetry(dev.chargerId, 1, &serr), QStringLiteral("遥测裁剪执行"));
+    CHECK(rowCount(db, QStringLiteral("charger_telemetry")) == 1,
+          QStringLiteral("裁剪后每桩只留最新帧"));
+
+    // 心跳: 每桩一行 upsert
+    DBManager::Heartbeat hb;
+    hb.chargerId = dev.chargerId;
+    hb.lastSeen = QStringLiteral("2026-09-07 10:00:05");
+    hb.status = QStringLiteral("charging");
+    hb.uptimeS = 125;
+    CHECK(db.upsertHeartbeat(hb, &serr), QStringLiteral("心跳首写"));
+    hb.lastSeen = QStringLiteral("2026-09-07 10:00:10");
+    hb.uptimeS = 130;
+    CHECK(db.upsertHeartbeat(hb, &serr), QStringLiteral("心跳再次上报(upsert)"));
+    CHECK(rowCount(db, QStringLiteral("charger_heartbeat")) == 1,
+          QStringLiteral("心跳每桩只有一行"));
+    DBManager::Heartbeat hbOut;
+    CHECK(db.getHeartbeat(dev.chargerId, &hbOut) && hbOut.uptimeS == 130
+              && hbOut.lastSeen == QStringLiteral("2026-09-07 10:00:10"),
+          QStringLiteral("心跳读取为最新值"));
+    QVector<DBManager::Heartbeat> hbs;
+    CHECK(db.listHeartbeats(&hbs, &serr) && hbs.size() == 1,
+          QStringLiteral("心跳列表可查"));
+
+    // 状态投影: 有进行中订单时跳过(订单流程负责), 无订单时设备状态写入
+    qint64 devOrderId = 0;
+    CHECK(db.orderConnect(user4.userId, dev.chargerId, &devOrderId, &serr),
+          QStringLiteral("设备测试: 给 DEV-01 下单(桩转已连接)"));
+    CHECK(db.syncChargerDeviceStatus(dev.chargerId, ChargerIdle, &serr),
+          QStringLiteral("订单中状态投影不报错(跳过)"));
+    DBManager::Charger proj;
+    db.getCharger(dev.chargerId, &proj);
+    CHECK(proj.status == ChargerConnected,
+          QStringLiteral("有进行中订单时设备上报不覆盖订单状态"));
+    db.orderCancel(devOrderId, &serr);
+    CHECK(db.syncChargerDeviceStatus(dev.chargerId, ChargerCharging, &serr),
+          QStringLiteral("无订单时状态投影执行"));
+    db.getCharger(dev.chargerId, &proj);
+    CHECK(proj.status == ChargerCharging,
+          QStringLiteral("设备状态已投影 charger.status"));
+    db.syncChargerDeviceStatus(dev.chargerId, ChargerIdle, &serr);   // 还原空闲
+    CHECK(!db.syncChargerDeviceStatus(dev.chargerId, 9, &serr),
+          QStringLiteral("非法状态投影被拒"));
+
+    // 命令通道: 平台下发 -> 设备领取 -> 回填结果
+    qint64 cmdId = 0;
+    CHECK(db.pushDeviceCommand(dev.chargerId, QStringLiteral("start"), QString(),
+                               &cmdId, &serr) && cmdId != 0,
+          QStringLiteral("平台下发设备命令"));
+    CHECK(!db.pushDeviceCommand(999999, QStringLiteral("start"), QString(), nullptr, &serr),
+          QStringLiteral("给不存在的桩下发被拒: %1").arg(serr));
+    QVector<DBManager::DeviceCommand> pending;
+    CHECK(db.takePendingDeviceCommands(dev.chargerId, &pending, &serr)
+              && pending.size() == 1 && pending.at(0).command == QStringLiteral("start"),
+          QStringLiteral("设备领取到待执行命令"));
+    CHECK(db.finishDeviceCommand(cmdId, true, QStringLiteral("ok"), &serr),
+          QStringLiteral("设备回填执行成功"));
+    CHECK(db.takePendingDeviceCommands(dev.chargerId, &pending, &serr) && pending.isEmpty(),
+          QStringLiteral("执行后命令不再被领取"));
+    qint64 cmdId2 = 0;
+    db.pushDeviceCommand(dev.chargerId, QStringLiteral("fault"), QStringLiteral("2"),
+                         &cmdId2, &serr);
+    CHECK(db.finishDeviceCommand(cmdId2, false, QStringLiteral("需要状态 reserved"), &serr),
+          QStringLiteral("设备回填执行失败结果"));
+    QVector<DBManager::DeviceCommand> cmdList;
+    CHECK(db.listDeviceCommands(10, &cmdList, &serr) && cmdList.size() == 2
+              && cmdList.at(0).status == 2,
+          QStringLiteral("命令历史可查(含失败状态)"));
 
     qInfo().noquote() << QStringLiteral("\n结果: 通过 %1, 失败 %2").arg(g_pass).arg(g_fail);
     return g_fail == 0 ? 0 : 1;

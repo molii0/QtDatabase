@@ -8,5 +8,6 @@
         <file alias="migrations/004_add_user_avatar.sql">db/migrations/004_add_user_avatar.sql</file>
         <file alias="migrations/005_add_order_paid_debt.sql">db/migrations/005_add_order_paid_debt.sql</file>
         <file alias="migrations/006_add_user_debt.sql">db/migrations/006_add_user_debt.sql</file>
+        <file alias="migrations/007_device_access.sql">db/migrations/007_device_access.sql</file>
     </qresource>
 </RCC>

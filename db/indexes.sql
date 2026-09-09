@@ -31,3 +31,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_order_charger_active
 -- 新表配套索引
 CREATE INDEX IF NOT EXISTS idx_recharge_user ON recharge_log (user_id);
 CREATE INDEX IF NOT EXISTS idx_pred_station ON load_prediction (station_id);
+
+-- 设备接入(遥测按桩取最新若干帧 / 待执行命令按桩领取)
+CREATE INDEX IF NOT EXISTS idx_telemetry_charger ON charger_telemetry (charger_id, telemetry_id);
+CREATE INDEX IF NOT EXISTS idx_dcmd_charger_status ON device_command (charger_id, status);

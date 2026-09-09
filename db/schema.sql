@@ -98,3 +98,35 @@ CREATE TABLE IF NOT EXISTS load_prediction (
     idle_count    INTEGER NOT NULL DEFAULT 0,
     is_peak       INTEGER NOT NULL DEFAULT 0
 );
+
+-- 设备遥测表(Charger Device Simulator 每秒上报一帧, 旧帧按桩裁剪)
+CREATE TABLE IF NOT EXISTS charger_telemetry (
+    telemetry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    charger_id   INTEGER NOT NULL REFERENCES charger(charger_id),
+    ts           TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    power        REAL NOT NULL DEFAULT 0,
+    soc          REAL NOT NULL DEFAULT 0,
+    energy       REAL NOT NULL DEFAULT 0,
+    temperature  REAL NOT NULL DEFAULT 0
+);
+
+-- 设备心跳表(每桩一行, 上报即刷新; 超过阈值未刷新视为离线)
+CREATE TABLE IF NOT EXISTS charger_heartbeat (
+    charger_id INTEGER PRIMARY KEY REFERENCES charger(charger_id),
+    last_seen  TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT '',
+    uptime_s   INTEGER NOT NULL DEFAULT 0
+);
+
+-- 设备命令表(Server -> Device 通道: 平台写入, 设备轮询执行后回填)
+CREATE TABLE IF NOT EXISTS device_command (
+    command_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    charger_id INTEGER NOT NULL REFERENCES charger(charger_id),
+    command    TEXT NOT NULL,
+    arg        TEXT NOT NULL DEFAULT '',
+    status     INTEGER NOT NULL DEFAULT 0,
+    result     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    done_at    TEXT
+);
