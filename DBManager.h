@@ -11,7 +11,10 @@
 //   DBManager_station.cpp 充电站 + 充电桩(增删改/批量编号/故障恢复)
 //   DBManager_order.cpp  订单流程(orderConnect/orderStart/orderCancel/orderFinish)
 //   DBManager_stats.cpp  统计(营收汇总/按日营收/电桩状态分布)
-//   DBManager_seed.cpp   首次建库的演示数据
+//   DBManager_price.cpp  分时电价(峰谷平): 时段划分 + 按分钟切段的加权平均单价
+//   DBManager_seed.cpp   首次建库的演示数据(底数)
+//   DBManager_demogen.cpp 演示历史数据生成器(工具: 按需向前补历史订单/充值/
+//                        运维日志/负荷预测; 供 Web 开发期一键造大量数据)
 //   DBManager_device.cpp 设备接入(遥测/心跳/命令通道, Charger Simulator 对接)
 //   ChargeState.h/.cpp   状态机: 充电桩/订单的状态枚举与合法转换校验
 //
@@ -27,6 +30,7 @@
 
 #include "ChargeState.h"
 
+#include <QDateTime>
 #include <QMutex>
 #include <QSqlDatabase>
 #include <QString>
@@ -55,8 +59,21 @@ public:
         QString address;
         double  longitude = 0.0;
         double  latitude = 0.0;
-        double  price = 0.0;    // 充电单价(元/度)
+        double  price = 0.0;        // 平段价(元/度)
+        double  pricePeak = 0.0;    // 峰段价(元/度, 分时电价)
+        double  priceValley = 0.0;  // 谷段价(元/度, 分时电价)
     };
+
+    // ---------- 分时电价(峰谷平) ----------
+    // 时段划分(按充电发生的"分钟"切段计价): 峰 08-12、17-21; 谷 23-07; 其余为平
+    enum PriceBand { BandPeak = 0, BandFlat = 1, BandValley = 2 };
+    // minuteOfDay: 当天第几分钟(0..1439), 返回所在时段
+    static PriceBand priceBandOfMinute(int minuteOfDay);
+    // 一段充电(功率恒定)的加权平均单价(元/度): 从 start 起 durationSecs 秒,
+    // 每个整分钟按所在时段取 ratePeak/rateFlat/rateValley 对应价, 首尾不足 1 分钟按比例加权。
+    // 用法: amount = round2(energy * avgPriceOf(...)) —— 分时电价下仍与"电量×单价"一致。
+    static double avgPriceOf(double ratePeak, double rateFlat, double rateValley,
+                             const QDateTime &start, qint64 durationSecs);
 
     // ---------- 与 charger 表对应的结构 ----------
     struct Charger {
@@ -198,10 +215,12 @@ public:
     bool getStation(qint64 stationId, Station *out = nullptr) const; // 查单个电站, 返回是否存在
     bool addStation(const QString &name, const QString &codePrefix, const QString &address,
                     double longitude, double latitude, double price,
-                    qint64 *newStationId = nullptr, QString *err = nullptr);
+                    qint64 *newStationId = nullptr, QString *err = nullptr,
+                    double pricePeak = -1.0, double priceValley = -1.0);
     bool updateStation(qint64 stationId, const QString &name, const QString &codePrefix,
                        const QString &address, double longitude, double latitude,
-                       double price, QString *err = nullptr);
+                       double price, QString *err = nullptr,
+                       double pricePeak = -1.0, double priceValley = -1.0);
     bool deleteStation(qint64 stationId, QString *err = nullptr);    // 有桩禁止删除(BR-10)
     bool stationHasChargers(qint64 stationId, bool *has = nullptr) const;
 
@@ -267,6 +286,25 @@ public:
                              QString *err = nullptr);
     bool listDeviceCommands(int limit, QVector<DeviceCommand> *out, QString *err = nullptr) const;
 
+    // ---------------- 演示历史数据生成器(工具, 非业务功能) ----------------
+    // 给 Web/图表演示造大量"历史数据"的离线工具, 不属于业务增删改:
+    // 业务数据增删改一律走 REST 接口, 本生成器只批量回填"过去的历史",
+    // 与正式业务流程分离。详见 DBManager_demogen.cpp。
+    struct DemoGenResult {
+        int    daysRequested = 0;   // 本次要求覆盖的历史天数
+        int    daysGenerated = 0;   // 本次实际补出的天数(0=已覆盖, 无需生成)
+        qint64 ordersAdded    = 0;  // 新增历史订单数
+        qint64 rechargesAdded = 0;  // 新增充值流水数
+        qint64 opsLogsAdded   = 0;  // 新增运维日志数
+        qint64 predictionsAdded = 0;// 新增负荷预测行数
+    };
+    // 让 charging_order 覆盖到最近 days 天: 已有部分不动, 只向前补更早的缺失日期
+    // (幂等, 可重复运行); 同一窗口顺手补齐 recharge_log / ops_log / load_prediction。
+    // density: 订单/充值/运维日志的密度倍率(默认 1.0, 建议 0.1~10;
+    // 负荷预测固定每站每天 6 行, 不受 density 影响)。
+    bool generateDemoHistory(int days, double density = 1.0,
+                             DemoGenResult *out = nullptr, QString *err = nullptr);
+
 private:
     DBManager();
     ~DBManager();
@@ -285,9 +323,10 @@ private:
     static QString nowStr();    // 当前本地时间 "yyyy-MM-dd HH:mm:ss"
     static double round2(double v);   // 金额/电量保留 2 位小数
 
-    static constexpr int kSchemaVersion = 7;    // 当前数据库结构版本
+    static constexpr int kSchemaVersion = 8;    // 当前数据库结构版本
     // v5: 订单 paid/debt; v6: user.debt(未结清欠费)+充值先还款+欠费禁充(BR-04/BR-06 闭环)
     // v7: 设备接入表 charger_telemetry/charger_heartbeat/device_command(模拟器对接)
+    // v8: 分时电价 station.price_peak/price_valley(峰谷平)
 
     QString m_dbPath;
     mutable QMutex m_openMutex; // 保护"每个线程首次建连接"的并发

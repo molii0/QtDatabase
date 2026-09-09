@@ -21,6 +21,8 @@ SOURCES += \
         DBManager_order.cpp \
         DBManager_stats.cpp \
         DBManager_seed.cpp \
+        DBManager_demogen.cpp \
+        DBManager_price.cpp \
         DBManager_device.cpp \
         ApiServer.cpp \
         ApiServer_admin.cpp

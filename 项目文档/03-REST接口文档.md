@@ -22,9 +22,15 @@
 | 对象 | 字段 |
 | --- | --- |
 | user | userId, phone, nickname, **avatar**, balance, **debt(未结清欠费)**, status, statusText, registerTime |
-| station | stationId, name, codePrefix, address, longitude, latitude, price, totalChargers, idleChargers, connectedChargers, chargingChargers, faultChargers, **onlineRate**(%)，附近电站另有 **distanceKm** |
+| station | stationId, name, codePrefix, address, longitude, latitude, **price(平段价), pricePeak(峰段价), priceValley(谷段价)**, totalChargers, idleChargers, connectedChargers, chargingChargers, faultChargers, **onlineRate**(%)，附近电站另有 **distanceKm** |
 | charger | chargerId, stationId, code, type, typeText, power, status, statusText |
 | order | orderId, orderNo, userId, userPhone, stationId, **stationName**, chargerId, **chargerCode**, status, statusText, energy, amount, **paid(实扣)**, **debt(欠费)**, startTime, endTime |
+
+> **分时电价（峰谷平）**：`station.price` 是平段价(元/度，种子 0.65~0.92，已下调)；
+> `pricePeak/priceValley` 是峰/谷段价。时段：峰 08-12、17-21；谷 23-07；其余为平。
+> 订单 `amount` 按充电发生的**分钟切段**、用时段加权均价结算（`DBManager_price.cpp`），
+> 所以同一度电深夜比高峰便宜。新建/修改电站可传可选字段 `pricePeak/priceValley`，
+> 不传则按 平×1.35 / 平×0.55 自动推导（见 §21/22）。
 
 ---
 
@@ -163,6 +169,15 @@
 ### 28. 运维日志列表
 `GET /api/admin/logs?limit=50`（最近 limit 条，倒序）
 → `200 {"logs":[{logId,adminAccount,chargerId,chargerCode,action,detail,createdAt}]}`
+
+### 29. 演示数据生成（开发/演示专用，不属于正式业务）
+`POST /api/admin/demo/history` 请求体 `{"days":180, "density":1.0}`（都可选，days 默认 30、范围 1~730；density 0.1~20）
+→ `200 {"demoOnly":true,"daysRequested":180,"daysGenerated":150,"ordersAdded":..,"rechargesAdded":..,"opsLogsAdded":..,"predictionsAdded":..}`
+
+> 作用：把 `charging_order` 历史**向前补足**到最近 `days` 天（已有数据不动，幂等可重跑），
+> 同一窗口顺手补齐 `recharge_log / ops_log / load_prediction`——这三张表平时只有真实业务
+> 运行才会积累，新库默认是空的。它只是“造演示历史”的工具（离线命令等价写法：
+> `QtDatabase.exe --gen-history 180`），**不是**真实业务的增删改通道。
 
 ---
 

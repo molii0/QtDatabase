@@ -157,6 +157,9 @@ bool ApiServer::start(quint16 port)
                   [this](const QHttpServerRequest &req) { return onAdminListOrders(req); });
     m_httpServer->route("/api/admin/logs", QHttpServerRequest::Method::Get,
                   [this](const QHttpServerRequest &req) { return onAdminOpsLogs(req); });
+    // 演示专用(造大量历史数据给 Web 看; 非正式业务接口, 见 DBManager_demogen.cpp)
+    m_httpServer->route("/api/admin/demo/history", QHttpServerRequest::Method::Post,
+                  [this](const QHttpServerRequest &req) { return onAdminDemoGen(req); });
 
     // 注册成功后再真正开始监听
     if (!m_httpServer->bind(tcp)) {
@@ -283,7 +286,9 @@ QJsonObject ApiServer::stationJson(const DBManager::Station &s, double distanceK
     o[QStringLiteral("address")] = s.address;
     o[QStringLiteral("longitude")] = s.longitude;
     o[QStringLiteral("latitude")] = s.latitude;
-    o[QStringLiteral("price")] = s.price;
+    o[QStringLiteral("price")] = s.price;               // 平段价(元/度)
+    o[QStringLiteral("pricePeak")] = s.pricePeak;       // 峰段价(分时电价)
+    o[QStringLiteral("priceValley")] = s.priceValley;   // 谷段价(分时电价)
     o[QStringLiteral("codePrefix")] = s.codePrefix;
     // 统计该站电桩状态(空闲/已连接/充电中/故障)
     int total = 0, idle = 0, connected = 0, charging = 0, fault = 0;

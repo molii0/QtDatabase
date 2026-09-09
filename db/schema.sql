@@ -31,14 +31,18 @@ CREATE TABLE IF NOT EXISTS admin (
 );
 
 -- 充电站表(code_prefix 是站点缩写, 批量建桩编号用)
+-- 电价采用"分时电价(峰谷平)": price = 平段价; price_peak/price_valley = 峰/谷段价。
+--   时段划分: 峰 08-12、17-21; 谷 23-07; 其余为平(按充电发生的分钟切段计价)
 CREATE TABLE IF NOT EXISTS station (
-    station_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,
-    code_prefix TEXT NOT NULL DEFAULT '',
-    address     TEXT NOT NULL DEFAULT '',
-    longitude   REAL NOT NULL,
-    latitude    REAL NOT NULL,
-    price       REAL NOT NULL DEFAULT 0
+    station_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL,
+    code_prefix  TEXT NOT NULL DEFAULT '',
+    address      TEXT NOT NULL DEFAULT '',
+    longitude    REAL NOT NULL,
+    latitude     REAL NOT NULL,
+    price        REAL NOT NULL DEFAULT 0,       -- 平段价(元/度)
+    price_peak   REAL NOT NULL DEFAULT 0,       -- 峰段价(元/度)
+    price_valley REAL NOT NULL DEFAULT 0        -- 谷段价(元/度)
 );
 
 -- 充电桩表(status 见 ChargeState.h: 0空闲 1已连接 2充电中 3故障)

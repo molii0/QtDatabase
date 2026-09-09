@@ -10,10 +10,12 @@
 
 #include <QCoreApplication>
 #include <QDate>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QSqlQuery>
 #include <QThread>
+#include <QTime>
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -56,7 +58,7 @@ int main(int argc, char *argv[])
     QSqlQuery q(db.db());
     q.exec(QStringLiteral("SELECT MAX(version) FROM schema_version;"));
     if (q.next()) version = q.value(0).toInt();
-    CHECK(version >= 7, QStringLiteral("schema_version = %1").arg(version));
+    CHECK(version >= 8, QStringLiteral("schema_version = %1").arg(version));
 
     q.exec(QStringLiteral(
         "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'uq_%' ORDER BY name;"));
@@ -66,9 +68,8 @@ int main(int argc, char *argv[])
               && uq.contains(QStringLiteral("uq_order_charger_active")),
           QStringLiteral("BR-02/03 唯一索引存在: %1").arg(uq.join(QLatin1Char(','))));
 
-    CHECK(rowCount(db, QStringLiteral("\"user\"")) == 50, QStringLiteral("种子用户 50 个"));
-    CHECK(rowCount(db, QStringLiteral("station")) == 50, QStringLiteral("种子电站 50 座"));
-    CHECK(rowCount(db, QStringLiteral("charger")) == 300, QStringLiteral("种子电桩 300 台"));
+    CHECK(rowCount(db, QStringLiteral("\"user\"")) == 5, QStringLiteral("种子用户 5 个"));
+    CHECK(rowCount(db, QStringLiteral("station")) == 5, QStringLiteral("种子电站 5 座"));
     CHECK(rowCount(db, QStringLiteral("ops_log")) >= 0, QStringLiteral("ops_log 表存在"));
     CHECK(rowCount(db, QStringLiteral("charger_telemetry")) >= 0
               && rowCount(db, QStringLiteral("charger_heartbeat")) >= 0
@@ -105,7 +106,16 @@ int main(int argc, char *argv[])
 
     // ---------------- 电站 / 电桩管理 ----------------
     QVector<DBManager::Station> stations = db.listStations();
-    CHECK(stations.size() == 50, QStringLiteral("电站列表 50 座"));
+    CHECK(stations.size() == 5, QStringLiteral("电站列表 5 座"));
+    // 分时电价(v8): 每站都有 峰≥平≥谷 三段价
+    if (!stations.isEmpty()) {
+        const DBManager::Station &s0 = stations.first();
+        CHECK(s0.pricePeak >= s0.price && s0.priceValley <= s0.price
+                  && s0.priceValley < s0.pricePeak,
+              QStringLiteral("分时电价字段: 峰 %1 / 平 %2 / 谷 %3")
+                  .arg(s0.pricePeak, 0, 'f', 2).arg(s0.price, 0, 'f', 2)
+                  .arg(s0.priceValley, 0, 'f', 2));
+    }
     qint64 stationId = 0;
     CHECK(db.addStation(QStringLiteral("测试电站"), QStringLiteral("CS"),
                         QStringLiteral("测试地址"), 123.0, 41.0, 1.1, &stationId, &e),
@@ -244,6 +254,29 @@ int main(int argc, char *argv[])
     CHECK(db.chargerStatusCount(&sc, &serr) && sc.total == rowCount(db, QStringLiteral("charger")),
           QStringLiteral("电桩状态统计与总数一致"));
 
+    // ---------------- 分时电价(峰谷平, v8) ----------------
+    {
+        using DB = DBManager;
+        CHECK(DB::priceBandOfMinute(23 * 60 + 30) == DB::BandValley
+                  && DB::priceBandOfMinute(3 * 60) == DB::BandValley,
+              QStringLiteral("23:30 与 03:00 属谷段"));
+        CHECK(DB::priceBandOfMinute(9 * 60 + 30) == DB::BandPeak
+                  && DB::priceBandOfMinute(18 * 60) == DB::BandPeak,
+              QStringLiteral("09:30 与 18:00 属峰段"));
+        CHECK(DB::priceBandOfMinute(14 * 60) == DB::BandFlat
+                  && DB::priceBandOfMinute(7 * 60 + 30) == DB::BandFlat,
+              QStringLiteral("14:00 与 07:30 属平段"));
+
+        // 同一段电量, 谷段充电应明显比峰段便宜(电价 峰1.2/平0.8/谷0.4)
+        const QDateTime night(QDate(2026, 9, 1), QTime(23, 0));
+        const QDateTime noon(QDate(2026, 9, 1), QTime(9, 0));
+        const double valleyAvg = DB::avgPriceOf(1.2, 0.8, 0.4, night, 3600);
+        const double peakAvg = DB::avgPriceOf(1.2, 0.8, 0.4, noon, 3600);
+        CHECK(qAbs(valleyAvg - 0.4) < 0.001 && qAbs(peakAvg - 1.2) < 0.001,
+              QStringLiteral("纯谷段均价=0.4、纯峰段均价=1.2 (实测 %1 / %2)")
+                  .arg(valleyAvg, 0, 'f', 3).arg(peakAvg, 0, 'f', 3));
+    }
+
     // ---------------- 运维日志 ----------------
     CHECK(db.addOpsLog(QStringLiteral("admin"), idle.chargerId, after.code,
                        QStringLiteral("测试动作")),
@@ -350,6 +383,34 @@ int main(int argc, char *argv[])
     CHECK(db.listDeviceCommands(10, &cmdList, &serr) && cmdList.size() == 2
               && cmdList.at(0).status == 2,
           QStringLiteral("命令历史可查(含失败状态)"));
+
+    // ---------------- 演示历史数据生成器(工具, DBManager_demogen.cpp) ----------------
+    {
+        const qint64 ordersBefore = rowCount(db, QStringLiteral("charging_order"));
+        DBManager::DemoGenResult gr;
+        CHECK(db.generateDemoHistory(60, 1.0, &gr, &serr),
+              QStringLiteral("生成器: 扩展历史到 60 天: %1").arg(serr));
+        CHECK(gr.daysGenerated > 0 && gr.ordersAdded > 0,
+              QStringLiteral("生成器: 补出 %1 天、订单 +%2")
+                  .arg(gr.daysGenerated).arg(gr.ordersAdded));
+        const qint64 ordersAfter = rowCount(db, QStringLiteral("charging_order"));
+        CHECK(ordersAfter > ordersBefore,
+              QStringLiteral("生成器: 订单量增加 %1 -> %2").arg(ordersBefore).arg(ordersAfter));
+        CHECK(rowCount(db, QStringLiteral("recharge_log")) > 0
+                  && rowCount(db, QStringLiteral("ops_log")) > 0
+                  && rowCount(db, QStringLiteral("load_prediction")) > 0,
+              QStringLiteral("生成器: 充值流水/运维日志/负荷预测已补齐"));
+
+        // 幂等: 再跑一次不应新增任何数据
+        DBManager::DemoGenResult gr2;
+        CHECK(db.generateDemoHistory(60, 1.0, &gr2, &serr),
+              QStringLiteral("生成器: 重复运行成功(幂等)"));
+        CHECK(gr2.daysGenerated == 0
+                  && rowCount(db, QStringLiteral("charging_order")) == ordersAfter,
+              QStringLiteral("生成器: 重复运行不新增数据"));
+        CHECK(!db.generateDemoHistory(0, 1.0, nullptr, &serr),
+              QStringLiteral("生成器: 非法天数被拒"));
+    }
 
     qInfo().noquote() << QStringLiteral("\n结果: 通过 %1, 失败 %2").arg(g_pass).arg(g_fail);
     return g_fail == 0 ? 0 : 1;

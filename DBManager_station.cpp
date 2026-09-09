@@ -15,8 +15,9 @@ QVector<DBManager::Station> DBManager::listStations() const
 {
     QVector<Station> result;
     QSqlQuery q(db());
-    q.exec(QStringLiteral("SELECT station_id, name, code_prefix, address, longitude, latitude, price "
-                          "FROM station ORDER BY station_id;"));
+    q.exec(QStringLiteral("SELECT station_id, name, code_prefix, address, longitude, latitude,"
+                          "       price, price_peak, price_valley"
+                          " FROM station ORDER BY station_id;"));
     while (q.next()) {
         Station s;
         s.stationId = q.value(0).toLongLong();
@@ -26,6 +27,8 @@ QVector<DBManager::Station> DBManager::listStations() const
         s.longitude = q.value(4).toDouble();
         s.latitude = q.value(5).toDouble();
         s.price = q.value(6).toDouble();
+        s.pricePeak = q.value(7).toDouble();
+        s.priceValley = q.value(8).toDouble();
         result.append(s);
     }
     return result;
@@ -34,8 +37,9 @@ QVector<DBManager::Station> DBManager::listStations() const
 bool DBManager::getStation(qint64 stationId, Station *out) const
 {
     QSqlQuery q(db());
-    q.prepare(QStringLiteral("SELECT station_id, name, code_prefix, address, longitude, latitude, price "
-                             "FROM station WHERE station_id = :id;"));
+    q.prepare(QStringLiteral("SELECT station_id, name, code_prefix, address, longitude, latitude,"
+                             "       price, price_peak, price_valley"
+                             " FROM station WHERE station_id = :id;"));
     q.bindValue(QStringLiteral(":id"), stationId);
     if (!q.exec() || !q.next())
         return false;
@@ -47,28 +51,37 @@ bool DBManager::getStation(qint64 stationId, Station *out) const
         out->longitude = q.value(4).toDouble();
         out->latitude = q.value(5).toDouble();
         out->price = q.value(6).toDouble();
+        out->pricePeak = q.value(7).toDouble();
+        out->priceValley = q.value(8).toDouble();
     }
     return true;
 }
 
 bool DBManager::addStation(const QString &name, const QString &codePrefix,
                            const QString &address, double longitude, double latitude,
-                           double price, qint64 *newStationId, QString *err)
+                           double price, qint64 *newStationId, QString *err,
+                           double pricePeak, double priceValley)
 {
     if (name.trimmed().isEmpty()) {
         if (err) *err = QStringLiteral("充电站名称不能为空");
         return false;
     }
+    // 分时电价: 未显式给峰/谷价时, 按 峰=平×1.35、谷=平×0.55 自动推导
+    const double peak = pricePeak > 0.0 ? pricePeak : round2(price * 1.35);
+    const double valley = priceValley > 0.0 ? priceValley : round2(price * 0.55);
     QSqlQuery q(db());
     q.prepare(QStringLiteral(
-        "INSERT INTO station (name, code_prefix, address, longitude, latitude, price) "
-        "VALUES (:n, :cp, :ad, :lng, :lat, :p);"));
+        "INSERT INTO station (name, code_prefix, address, longitude, latitude, price,"
+        "                     price_peak, price_valley) "
+        "VALUES (:n, :cp, :ad, :lng, :lat, :p, :pk, :va);"));
     q.bindValue(QStringLiteral(":n"), name.trimmed());
     q.bindValue(QStringLiteral(":cp"), codePrefix.trimmed());
     q.bindValue(QStringLiteral(":ad"), address);
     q.bindValue(QStringLiteral(":lng"), longitude);
     q.bindValue(QStringLiteral(":lat"), latitude);
     q.bindValue(QStringLiteral(":p"), price);
+    q.bindValue(QStringLiteral(":pk"), peak);
+    q.bindValue(QStringLiteral(":va"), valley);
     if (!q.exec()) {
         if (err) *err = QStringLiteral("新增充电站失败: %1").arg(q.lastError().text());
         return false;
@@ -80,22 +93,28 @@ bool DBManager::addStation(const QString &name, const QString &codePrefix,
 
 bool DBManager::updateStation(qint64 stationId, const QString &name, const QString &codePrefix,
                               const QString &address, double longitude, double latitude,
-                              double price, QString *err)
+                              double price, QString *err,
+                              double pricePeak, double priceValley)
 {
     if (name.trimmed().isEmpty()) {
         if (err) *err = QStringLiteral("充电站名称不能为空");
         return false;
     }
+    const double peak = pricePeak > 0.0 ? pricePeak : round2(price * 1.35);
+    const double valley = priceValley > 0.0 ? priceValley : round2(price * 0.55);
     QSqlQuery q(db());
     q.prepare(QStringLiteral(
         "UPDATE station SET name = :n, code_prefix = :cp, address = :ad,"
-        " longitude = :lng, latitude = :lat, price = :p WHERE station_id = :id;"));
+        " longitude = :lng, latitude = :lat, price = :p,"
+        " price_peak = :pk, price_valley = :va WHERE station_id = :id;"));
     q.bindValue(QStringLiteral(":n"), name.trimmed());
     q.bindValue(QStringLiteral(":cp"), codePrefix.trimmed());
     q.bindValue(QStringLiteral(":ad"), address);
     q.bindValue(QStringLiteral(":lng"), longitude);
     q.bindValue(QStringLiteral(":lat"), latitude);
     q.bindValue(QStringLiteral(":p"), price);
+    q.bindValue(QStringLiteral(":pk"), peak);
+    q.bindValue(QStringLiteral(":va"), valley);
     q.bindValue(QStringLiteral(":id"), stationId);
     if (!q.exec()) {
         if (err) *err = QStringLiteral("修改充电站失败: %1").arg(q.lastError().text());

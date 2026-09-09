@@ -416,7 +416,26 @@ bool DBManager::applyMigrations(int fromVersion, QString *err)
         fromVersion = 7;
     }
 
-    // 以后新迁移照此继续加: if (fromVersion < 8) {... 执行 /db/migrations/008_*.sql ...}
+    // 迁移 8: 分时电价 station.price_peak/price_valley(峰谷平, 原 price 视为平段价)
+    if (fromVersion < 8) {
+        if (!beginTransaction())
+            return fail(QStringLiteral("迁移8: 开启事务失败"));
+        QSqlQuery q(db());
+        QString migErr;
+        if (!execResource(q, QStringLiteral(":/db/migrations/008_time_of_use_price.sql"),
+                          &migErr)) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移8: %1").arg(migErr));
+        }
+        if (!writeSchemaVersion(8) || !commitTransaction()) {
+            rollbackTransaction();
+            return fail(QStringLiteral("迁移8: 提交失败"));
+        }
+        qDebug() << "数据库迁移 8 完成(分时电价: 峰/平/谷)。";
+        fromVersion = 8;
+    }
+
+    // 以后新迁移照此继续加: if (fromVersion < 9) {... 执行 /db/migrations/009_*.sql ...}
     return true;
 }
 

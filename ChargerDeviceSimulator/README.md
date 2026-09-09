@@ -83,7 +83,7 @@ ChargerDeviceSimulator/
    - `--db FILE`：平台数据库文件；不传则用 **DBManager 默认库 = 工程根目录**
      `charge_platform.db`（`.pro` 里 `DEFAULT_DB_DIR` 固定，平台与模拟器共用同一
      个文件，WAL 支持两进程并发）；文件不存在会自动建库并写入演示数据
-     （50 站 × 6 桩 ≈ 300 台桩）
+     （5 站 × 6 桩 ≈ 30 台桩，正常量）
    - `--station ID`：只模拟该电站下的电桩
    - `--devices N`：最多绑定电桩数（默认 3，上限 30）
    - `--duration SEC`：运行 N 秒后自动退出（自检/演示用）

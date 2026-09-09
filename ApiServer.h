@@ -91,6 +91,8 @@ private:
     QHttpServerResponse onAdminChargerAction(const QHttpServerRequest &req);   // fault/recover
     QHttpServerResponse onAdminListOrders(const QHttpServerRequest &req);
     QHttpServerResponse onAdminOpsLogs(const QHttpServerRequest &req);         // /api/admin/logs
+    // 演示专用: POST /api/admin/demo/history {days, density}(造大量历史数据, 见 DBManager_demogen.cpp)
+    QHttpServerResponse onAdminDemoGen(const QHttpServerRequest &req);
 
     // 把 DB 结果转成响应(带状态码映射); okData 仅成功时用
     QHttpServerResponse dbResult(bool ok, const QString &err,

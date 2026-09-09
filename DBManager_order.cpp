@@ -369,10 +369,11 @@ bool DBManager::orderFinish(qint64 orderId, QString *err)
     };
     const QSqlDatabase dbc = db();
 
-    // 1. 读取订单及其关联的电桩功率、电站单价(只处理"充电中"的订单)
+    // 1. 读取订单及其关联的电桩功率、电站分时电价(峰/平/谷)(只处理"充电中"的订单)
     QSqlQuery query(dbc);
     query.prepare(QStringLiteral(
-        "SELECT o.user_id, o.charger_id, o.start_time, c.power, s.price, o.status"
+        "SELECT o.user_id, o.charger_id, o.start_time, c.power,"
+        "       s.price, s.price_peak, s.price_valley, o.status"
         "  FROM charging_order o"
         "  JOIN charger c ON o.charger_id = c.charger_id"
         "  JOIN station s ON o.station_id = s.station_id"
@@ -381,30 +382,34 @@ bool DBManager::orderFinish(qint64 orderId, QString *err)
     if (!query.exec() || !query.next())
         return rollbackAndFail(QStringLiteral("订单不存在 (orderId=%1)").arg(orderId));
 
-    if (query.value(5).toInt() != OrderCharging)
+    if (query.value(7).toInt() != OrderCharging)
         return rollbackAndFail(QStringLiteral("订单当前为[%1]，不能结算")
-                                   .arg(orderStateText(query.value(5).toInt())));
+                                   .arg(orderStateText(query.value(7).toInt())));
 
     const qint64 userId = query.value(0).toLongLong();
     const qint64 chargerId = query.value(1).toLongLong();
     const QDateTime startTime = QDateTime::fromString(query.value(2).toString(),
                                                       QStringLiteral("yyyy-MM-dd HH:mm:ss"));
     const double power = query.value(3).toDouble();   // 电桩功率(kW)
-    const double price = query.value(4).toDouble();   // 电站单价(元/度)
+    const double flatPrice = query.value(4).toDouble();       // 平段价(元/度)
+    const double peakPrice = query.value(5).toDouble();       // 峰段价
+    const double valleyPrice = query.value(6).toDouble();     // 谷段价
     if (!startTime.isValid())
         return rollbackAndFail(QStringLiteral("订单开始时间格式无效"));
 
-    // 2. 按已充电时长计算电量与费用: 电量 = 功率×小时, 费用 = 电量×单价
+    // 2. 按已充电时长计算电量与费用:
+    //    电量 = 功率×小时; 单价 = 按充电时段切段的"加权平均单价"(分时电价, 见 DBManager_price.cpp)
     const qint64 durationSecs = startTime.secsTo(QDateTime::currentDateTime());
     if (durationSecs <= 0)
         return rollbackAndFail(QStringLiteral("充电时长不足(≤0 秒)，无法结算，请稍后再试"));
 
     const double energy = round2(power * durationSecs / 3600.0);
-    double amount = round2(energy * price);
+    const double avgPrice = avgPriceOf(peakPrice, flatPrice, valleyPrice, startTime, durationSecs);
+    double amount = round2(energy * avgPrice);
     if (amount < 0.01 && amount > 0)
         amount = 0.01;      // 极小金额保护, 防止"免费充电"
     qDebug() << "结算: 时长" << durationSecs / 60 << "分钟,"
-             << "电量" << energy << "度, 费用" << amount << "元";
+             << "电量" << energy << "度, 时段均价" << avgPrice << "元/度, 费用" << amount << "元";
 
     // 3. 读取用户余额/未结清欠费, 计算"实扣/欠费"(BR-06):
     //    余额充足 -> 全额扣款, 欠费 0;

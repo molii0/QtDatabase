@@ -9,5 +9,6 @@
         <file alias="migrations/005_add_order_paid_debt.sql">db/migrations/005_add_order_paid_debt.sql</file>
         <file alias="migrations/006_add_user_debt.sql">db/migrations/006_add_user_debt.sql</file>
         <file alias="migrations/007_device_access.sql">db/migrations/007_device_access.sql</file>
+        <file alias="migrations/008_time_of_use_price.sql">db/migrations/008_time_of_use_price.sql</file>
     </qresource>
 </RCC>

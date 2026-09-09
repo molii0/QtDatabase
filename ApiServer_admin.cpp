@@ -201,13 +201,18 @@ QHttpServerResponse ApiServer::onAdminCreateStation(const QHttpServerRequest &re
     const double longitude = body.value(QStringLiteral("longitude")).toDouble();
     const double latitude = body.value(QStringLiteral("latitude")).toDouble();
     const double price = body.value(QStringLiteral("price")).toDouble();
+    // 可选: 分时电价峰/谷段价; 不给则按 平×1.35 / 平×0.55 自动推导
+    const double pricePeak = body.contains(QStringLiteral("pricePeak"))
+                                 ? body.value(QStringLiteral("pricePeak")).toDouble() : -1.0;
+    const double priceValley = body.contains(QStringLiteral("priceValley"))
+                                   ? body.value(QStringLiteral("priceValley")).toDouble() : -1.0;
     if (name.trimmed().isEmpty())
         return jsonError(400, QStringLiteral("充电站名称不能为空"));
 
     QString err;
     qint64 stationId = 0;
     if (!m_db.addStation(name, codePrefix, address, longitude, latitude, price,
-                         &stationId, &err))
+                         &stationId, &err, pricePeak, priceValley))
         return jsonError(dbErrorStatus(err), err);
 
     QJsonObject data;
@@ -233,11 +238,16 @@ QHttpServerResponse ApiServer::onAdminUpdateStation(const QHttpServerRequest &re
     const double longitude = body.value(QStringLiteral("longitude")).toDouble();
     const double latitude = body.value(QStringLiteral("latitude")).toDouble();
     const double price = body.value(QStringLiteral("price")).toDouble();
+    const double pricePeak = body.contains(QStringLiteral("pricePeak"))
+                                 ? body.value(QStringLiteral("pricePeak")).toDouble() : -1.0;
+    const double priceValley = body.contains(QStringLiteral("priceValley"))
+                                   ? body.value(QStringLiteral("priceValley")).toDouble() : -1.0;
     if (name.trimmed().isEmpty())
         return jsonError(400, QStringLiteral("充电站名称不能为空"));
 
     QString err;
-    if (!m_db.updateStation(stationId, name, codePrefix, address, longitude, latitude, price, &err))
+    if (!m_db.updateStation(stationId, name, codePrefix, address, longitude, latitude,
+                            price, &err, pricePeak, priceValley))
         return jsonError(dbErrorStatus(err), err);
 
     QJsonObject data;
@@ -466,5 +476,49 @@ QHttpServerResponse ApiServer::onAdminRevenueByCharger(const QHttpServerRequest 
     }
     QJsonObject data;
     data[QStringLiteral("items")] = arr;
+    return jsonOk(data);
+}
+
+// POST /api/admin/demo/history {days?, density?} —— 演示专用
+// 给 Web/图表演示批量造"历史数据"(向前补足最近 days 天的历史订单, 并补齐
+// 充值流水/运维日志/负荷预测)。仅作开发/演示工具, 不属于正式业务接口。
+QHttpServerResponse ApiServer::onAdminDemoGen(const QHttpServerRequest &req)
+{
+    QString account;
+    if (!requireAdmin(req, &account))
+        return unauthorized();
+
+    QJsonObject body;
+    if (!parseBody(req, &body))
+        return jsonError(400, QStringLiteral("请求体必须是 JSON"));
+
+    int days = body.value(QStringLiteral("days")).toInt();
+    if (days == 0)
+        days = 30;                                  // 默认 30 天
+    if (days < 1 || days > 730)
+        return jsonError(400, QStringLiteral("days 需要 1~730"));
+    double density = body.value(QStringLiteral("density")).toDouble();
+    if (density <= 0.0)
+        density = 1.0;
+    if (density < 0.1 || density > 20.0)
+        return jsonError(400, QStringLiteral("density 需要 0.1~20"));
+
+    DBManager::DemoGenResult r;
+    QString err;
+    if (!m_db.generateDemoHistory(days, density, &r, &err))
+        return jsonError(dbErrorStatus(err), err);
+
+    QJsonObject data;
+    data[QStringLiteral("demoOnly")] = true;        // 开发/演示专用标记
+    data[QStringLiteral("message")] =
+        r.daysGenerated == 0
+            ? QStringLiteral("历史已覆盖, 无需生成(演示数据)")
+            : QStringLiteral("演示历史数据已生成");
+    data[QStringLiteral("daysRequested")] = r.daysRequested;
+    data[QStringLiteral("daysGenerated")] = r.daysGenerated;
+    data[QStringLiteral("ordersAdded")] = static_cast<double>(r.ordersAdded);
+    data[QStringLiteral("rechargesAdded")] = static_cast<double>(r.rechargesAdded);
+    data[QStringLiteral("opsLogsAdded")] = static_cast<double>(r.opsLogsAdded);
+    data[QStringLiteral("predictionsAdded")] = static_cast<double>(r.predictionsAdded);
     return jsonOk(data);
 }
