@@ -141,9 +141,18 @@ bool DBManager::generateDemoHistory(int days, double density,
     // 已有历史比要求窗口更早的日期都算"已覆盖"; 只补 [firstWanted, oldestCovered) 之间的缺失天
     const int missingDays = qMax(0, firstWanted.daysTo(oldestCovered));
 
+    // 未来 48 小时预测也顺手补齐(管理端"智能预测"页要的是未来曲线, 幂等)
+    qint64 futurePredAdded = 0;
+    {
+        QString predErr;
+        if (!ensureFuturePredictions(48, &futurePredAdded, &predErr))
+            return fail(QStringLiteral("生成未来预测失败: %1").arg(predErr));
+    }
+
     if (out) {
         out->daysRequested = days;
         out->daysGenerated = missingDays;
+        out->predictionsAdded = futurePredAdded;
     }
     if (missingDays == 0)
         return true;                          // 已覆盖, 幂等空跑
@@ -348,7 +357,7 @@ bool DBManager::generateDemoHistory(int days, double density,
         out->ordersAdded = nOrders;
         out->rechargesAdded = nRecharge;
         out->opsLogsAdded = nOps;
-        out->predictionsAdded = nPred;
+        out->predictionsAdded = nPred + futurePredAdded;
     }
     qDebug() << "历史数据生成完成: 补" << missingDays << "天"
              << "(订单 +" << nOrders << ", 充值 +" << nRecharge

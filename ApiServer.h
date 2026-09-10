@@ -91,6 +91,8 @@ private:
     QHttpServerResponse onAdminChargerAction(const QHttpServerRequest &req);   // fault/recover
     QHttpServerResponse onAdminListOrders(const QHttpServerRequest &req);
     QHttpServerResponse onAdminOpsLogs(const QHttpServerRequest &req);         // /api/admin/logs
+    // 管理端"智能预测"页: GET /api/admin/predictions?hours=24&stationId=
+    QHttpServerResponse onAdminPredictions(const QHttpServerRequest &req);
     // 演示专用: POST /api/admin/demo/history {days, density}(造大量历史数据, 见 DBManager_demogen.cpp)
     QHttpServerResponse onAdminDemoGen(const QHttpServerRequest &req);
 

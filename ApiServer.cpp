@@ -157,6 +157,9 @@ bool ApiServer::start(quint16 port)
                   [this](const QHttpServerRequest &req) { return onAdminListOrders(req); });
     m_httpServer->route("/api/admin/logs", QHttpServerRequest::Method::Get,
                   [this](const QHttpServerRequest &req) { return onAdminOpsLogs(req); });
+    // 管理端"智能预测"页: 未来 N 小时预测曲线 + 各站预测电量
+    m_httpServer->route("/api/admin/predictions", QHttpServerRequest::Method::Get,
+                  [this](const QHttpServerRequest &req) { return onAdminPredictions(req); });
     // 演示专用(造大量历史数据给 Web 看; 非正式业务接口, 见 DBManager_demogen.cpp)
     m_httpServer->route("/api/admin/demo/history", QHttpServerRequest::Method::Post,
                   [this](const QHttpServerRequest &req) { return onAdminDemoGen(req); });

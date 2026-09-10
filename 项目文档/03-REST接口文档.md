@@ -25,6 +25,8 @@
 | station | stationId, name, codePrefix, address, longitude, latitude, **price(平段价), pricePeak(峰段价), priceValley(谷段价)**, totalChargers, idleChargers, connectedChargers, chargingChargers, faultChargers, **onlineRate**(%)，附近电站另有 **distanceKm** |
 | charger | chargerId, stationId, code, type, typeText, power, status, statusText |
 | order | orderId, orderNo, userId, userPhone, stationId, **stationName**, chargerId, **chargerCode**, status, statusText, energy, amount, **paid(实扣)**, **debt(欠费)**, startTime, endTime |
+| predictionCurve | targetTime, loadKwh, idleCount, isPeak, stations（见 §30） |
+| predictionByStation | stationId, name, loadKwh, points, avgIdle（见 §30） |
 
 > **分时电价（峰谷平）**：`station.price` 是平段价(元/度，种子 0.65~0.92，已下调)；
 > `pricePeak/priceValley` 是峰/谷段价。时段：峰 08-12、17-21；谷 23-07；其余为平。
@@ -178,6 +180,34 @@
 > 同一窗口顺手补齐 `recharge_log / ops_log / load_prediction`——这三张表平时只有真实业务
 > 运行才会积累，新库默认是空的。它只是“造演示历史”的工具（离线命令等价写法：
 > `QtDatabase.exe --gen-history 180`），**不是**真实业务的增删改通道。
+
+### 30. 智能预测（管理端"智能预测"页）
+`GET /api/admin/predictions?hours=24&stationId=`（`hours` 默认 24、范围 1~168；`stationId` 可选，不传=全部电站）
+
+```jsonc
+{
+  "hours": 24,
+  "from": "2026-09-09 13:00:00",          // 窗口起点 = 当前整点
+  "to":   "2026-09-10 12:00:00",
+  "generatedAt": "2026-09-09 10:00:00",   // 最近一次预测生成时间(ML 脚本写入时间)
+  "curve": [                               // 未来 24h 逐时预测曲线(按 targetTime 升序)
+    { "targetTime": "2026-09-09 13:00:00", "loadKwh": 412.5,
+      "idleCount": 21, "isPeak": false, "stations": 5 }
+  ],
+  "stations": [                            // 各站窗口内预测电量(按 loadKwh 降序)
+    { "stationId": 1, "name": "东软软件园充电站(浑南)",
+      "loadKwh": 1860.4, "points": 24, "avgIdle": 4.2 }
+  ]
+}
+```
+
+- 数据源：`load_prediction` 表（`target_time` 落在 `[from, to)` 内）；`isPeak` 为布尔，
+  用于给高峰时段标色。`curve` 是**多站聚合**（`stations` = 该时刻参与聚合的站数），
+  带 `stationId` 时变成**单站曲线**；`stations` 数组此时只有一行。
+- 窗口内没有数据时：`curve`/`stations` 为空数组，并多返回一个 `message` 提示
+  （演示库可跑 `QtDatabase.exe --gen-history 1` 或调 §29 的演示生成接口补数据）。
+- 真实系统里这张表由 ML 预测脚本写入；演示库在初始化种子时会自动写入**未来 48 小时**
+  的预测（每站每小时一行，幂等补齐），所以页面开箱即有数据可看。
 
 ---
 

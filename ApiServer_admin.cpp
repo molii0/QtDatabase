@@ -1,9 +1,12 @@
 #include "ApiServer.h"
 
+#include <QDate>
+#include <QDateTime>
 #include <QDebug>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonParseError>
+#include <QTime>
 
 #include <QtHttpServer/qhttpserverrequest.h>
 #include <QtHttpServer/qhttpserverresponse.h>
@@ -520,5 +523,72 @@ QHttpServerResponse ApiServer::onAdminDemoGen(const QHttpServerRequest &req)
     data[QStringLiteral("rechargesAdded")] = static_cast<double>(r.rechargesAdded);
     data[QStringLiteral("opsLogsAdded")] = static_cast<double>(r.opsLogsAdded);
     data[QStringLiteral("predictionsAdded")] = static_cast<double>(r.predictionsAdded);
+    return jsonOk(data);
+}
+
+// GET /api/admin/predictions?hours=24&stationId=  —— 管理端"智能预测"页
+// 返回: 未来 hours 小时的逐时预测曲线 + 各站预测电量(数据源 load_prediction)
+QHttpServerResponse ApiServer::onAdminPredictions(const QHttpServerRequest &req)
+{
+    QString account;
+    if (!requireAdmin(req, &account))
+        return unauthorized();
+
+    bool okHours = false;
+    int hours = req.query().queryItemValue(QStringLiteral("hours")).toInt(&okHours);
+    if (!okHours || hours <= 0 || hours > 168)
+        hours = 24;                                     // 默认未来 24 小时
+    // stationId 可选: 只预测一个站; 不传/非法 = 全部站
+    const qint64 stationId = parseId(req.query().queryItemValue(QStringLiteral("stationId")));
+
+    QString generatedAt, err;
+    QVector<DBManager::PredictionPoint> curve;
+    QVector<DBManager::PredictionByStation> byStation;
+    if (!m_db.listPredictions(hours, stationId, &curve, &byStation, &generatedAt, &err))
+        return jsonError(500, err);
+
+    // 逐时曲线(前端直接画折线; isPeak 用于给高峰时段标色/底色)
+    QJsonArray curveArr;
+    for (const DBManager::PredictionPoint &p : curve) {
+        QJsonObject item;
+        item[QStringLiteral("targetTime")] = p.targetTime;
+        item[QStringLiteral("loadKwh")] = p.loadKwh;
+        item[QStringLiteral("idleCount")] = static_cast<double>(p.idleCount);
+        item[QStringLiteral("isPeak")] = (p.isPeak == 1);
+        item[QStringLiteral("stations")] = static_cast<double>(p.stations);
+        curveArr.append(item);
+    }
+
+    // 各站预测电量(前端画柱状图/排行榜)
+    QJsonArray stationArr;
+    for (const DBManager::PredictionByStation &s : byStation) {
+        QJsonObject item;
+        item[QStringLiteral("stationId")] = static_cast<double>(s.stationId);
+        item[QStringLiteral("name")] = s.name;
+        item[QStringLiteral("loadKwh")] = s.loadKwh;
+        item[QStringLiteral("points")] = static_cast<double>(s.points);
+        item[QStringLiteral("avgIdle")] = s.avgIdle;
+        stationArr.append(item);
+    }
+
+    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime from(QDate(now.date()), QTime(now.time().hour(), 0));   // 当前整点
+    const QDateTime to = from.addSecs(static_cast<qint64>(hours) * 3600);
+
+    QJsonObject data;
+    data[QStringLiteral("hours")] = hours;
+    data[QStringLiteral("from")] = from.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    data[QStringLiteral("to")] = to.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    data[QStringLiteral("generatedAt")] = generatedAt.isEmpty()
+                                              ? QJsonValue(QJsonValue::Null)
+                                              : QJsonValue(generatedAt);
+    if (stationId > 0)
+        data[QStringLiteral("stationId")] = static_cast<double>(stationId);
+    data[QStringLiteral("curve")] = curveArr;
+    data[QStringLiteral("stations")] = stationArr;
+    if (curve.isEmpty()) {
+        data[QStringLiteral("message")] = QStringLiteral(
+            "暂无未来预测数据(演示库可跑 QtDatabase.exe --gen-history 或调 POST /api/admin/demo/history 补充)");
+    }
     return jsonOk(data);
 }

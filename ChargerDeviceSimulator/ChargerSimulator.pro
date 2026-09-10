@@ -35,6 +35,7 @@ SOURCES += \
     ../DBManager_stats.cpp \
     ../DBManager_seed.cpp \
     ../DBManager_price.cpp \
+    ../DBManager_prediction.cpp \
     ../DBManager_device.cpp
 
 HEADERS += \

@@ -12,6 +12,7 @@
 //   DBManager_order.cpp  订单流程(orderConnect/orderStart/orderCancel/orderFinish)
 //   DBManager_stats.cpp  统计(营收汇总/按日营收/电桩状态分布)
 //   DBManager_price.cpp  分时电价(峰谷平): 时段划分 + 按分钟切段的加权平均单价
+//   DBManager_prediction.cpp 智能预测: 未来时段预测读取 + 演示用未来预测补充工具
 //   DBManager_seed.cpp   首次建库的演示数据(底数)
 //   DBManager_demogen.cpp 演示历史数据生成器(工具: 按需向前补历史订单/充值/
 //                        运维日志/负荷预测; 供 Web 开发期一键造大量数据)
@@ -285,6 +286,35 @@ public:
     bool finishDeviceCommand(qint64 commandId, bool ok, const QString &result,
                              QString *err = nullptr);
     bool listDeviceCommands(int limit, QVector<DeviceCommand> *out, QString *err = nullptr) const;
+
+    // ---------------- 智能预测(load_prediction, 管理端"智能预测"页) ----------------
+    // 曲线点: 某时刻的预测负荷(多站聚合或单站)
+    struct PredictionPoint {
+        QString targetTime;     // 预测目标时刻 yyyy-MM-dd HH:mm:ss
+        double  loadKwh = 0.0;  // 该时刻预测电量(度)
+        qint64  idleCount = 0;  // 该时刻预计空闲桩数(聚合=各站相加)
+        int     isPeak = 0;     // 1=预测高峰时段
+        qint64  stations = 0;   // 参与聚合的电站数
+    };
+    // 各站未来窗口的预测电量(降序)
+    struct PredictionByStation {
+        qint64  stationId = 0;
+        QString name;
+        double  loadKwh = 0.0;  // 窗口内预测总电量(度)
+        qint64  points = 0;     // 预测点数(时段数)
+        double  avgIdle = 0.0;  // 平均预计空闲桩数
+    };
+    // 读"未来 hours 小时"的预测: curve=逐时曲线, byStation=各站预测电量
+    // (stationId <= 0 表示全部电站; lastGenerated 回填最近一次预测生成时间, 可为空)
+    bool listPredictions(int hours, qint64 stationId,
+                         QVector<PredictionPoint> *curve,
+                         QVector<PredictionByStation> *byStation,
+                         QString *lastGenerated = nullptr,
+                         QString *err = nullptr) const;
+    // 工具(演示/离线): 保证未来 hours 小时的逐时预测存在, 缺哪段补哪段(幂等);
+    // 真实系统里 load_prediction 由 ML 预测脚本写入, 这里给演示库打底。
+    bool ensureFuturePredictions(int hours = 24, qint64 *insertedOut = nullptr,
+                                 QString *err = nullptr);
 
     // ---------------- 演示历史数据生成器(工具, 非业务功能) ----------------
     // 给 Web/图表演示造大量"历史数据"的离线工具, 不属于业务增删改:

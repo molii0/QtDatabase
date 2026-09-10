@@ -277,6 +277,35 @@ int main(int argc, char *argv[])
                   .arg(valleyAvg, 0, 'f', 3).arg(peakAvg, 0, 'f', 3));
     }
 
+    // ---------------- 智能预测(load_prediction 读取, 管理端"智能预测"页) ----------------
+    {
+        QVector<DBManager::PredictionPoint> curve;
+        QVector<DBManager::PredictionByStation> bySt;
+        QString genAt, perr;
+        CHECK(db.listPredictions(24, -1, &curve, &bySt, &genAt, &perr) && !curve.isEmpty(),
+              QStringLiteral("预测: 未来24h曲线 %1 个点").arg(curve.size()));
+        CHECK(bySt.size() == 5, QStringLiteral("预测: 各站预测电量 %1 座").arg(bySt.size()));
+        if (!curve.isEmpty()) {
+            double total = 0.0;
+            for (const DBManager::PredictionPoint &p : curve)
+                total += p.loadKwh;
+            CHECK(total > 0.0 && curve.first().stations > 0 && !genAt.isEmpty(),
+                  QStringLiteral("预测: 合计 %1 度, 首点覆盖 %2 站, 生成于 %3")
+                      .arg(total, 0, 'f', 1).arg(curve.first().stations).arg(genAt));
+        }
+        // 单站过滤(前端下拉选某个站时用)
+        QVector<DBManager::PredictionPoint> c1;
+        QVector<DBManager::PredictionByStation> b1;
+        const qint64 sid = bySt.isEmpty() ? 1 : bySt.first().stationId;
+        CHECK(db.listPredictions(24, sid, &c1, &b1, nullptr, &perr) && b1.size() == 1
+                  && !c1.isEmpty(),
+              QStringLiteral("预测: 单站过滤(stationId=%1)").arg(sid));
+        // 补充工具幂等: 种子已写入未来预测, 再补应为 0 行
+        qint64 ins = -1;
+        CHECK(db.ensureFuturePredictions(24, &ins, &perr) && ins == 0,
+              QStringLiteral("预测: 幂等补充(新增 %1 行)").arg(ins));
+    }
+
     // ---------------- 运维日志 ----------------
     CHECK(db.addOpsLog(QStringLiteral("admin"), idle.chargerId, after.code,
                        QStringLiteral("测试动作")),

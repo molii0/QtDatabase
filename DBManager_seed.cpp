@@ -283,6 +283,20 @@ bool DBManager::seedData()
     q.bindValue(QStringLiteral(":id"), activePile.chargerId);
     if (!q.exec()) { qDebug() << "种子数据: 更新电桩状态失败" << q.lastError().text(); dbc.rollback(); return false; }
 
+    // ---------- 7. 未来 48 小时负荷预测 ----------
+    //    管理端"智能预测"页要展示未来 24h 曲线与各站预测电量, 这里给演示库打底;
+    //    真实系统里 load_prediction 由 ML 预测脚本写入(见 DBManager_prediction.cpp)
+    {
+        QString predErr;
+        qint64 predInserted = 0;
+        if (!ensureFuturePredictions(48, &predInserted, &predErr)) {
+            qDebug() << "种子数据: 生成未来负荷预测失败" << predErr;
+            dbc.rollback();
+            return false;
+        }
+        qDebug() << "种子数据: 未来 48 小时预测已写入" << predInserted << "行";
+    }
+
     if (!dbc.commit()) {
         qDebug() << "种子数据: 提交事务失败";
         dbc.rollback();
