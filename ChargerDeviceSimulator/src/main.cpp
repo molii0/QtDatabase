@@ -20,6 +20,7 @@
 #include "simulator.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QStringList>
 #include <QTextStream>
 
@@ -29,9 +30,10 @@ static void printUsage()
     out << "ChargerSimulator v2 - 充电桩设备仿真(Device Side, 只与数据库层对接)\n"
            "用法:\n"
            "  ChargerSimulator [--db FILE] [--station ID] [--devices N]\n"
-           "                   [--duration SEC] [--auto] [--help]\n"
-           "    --db FILE      平台数据库文件(默认 工程根目录 charge_platform.db,\n"
-           "                    与平台 QtDatabase 共用同一个库; 不存在会自动建库)\n"
+           "                   [--duration SEC] [--auto] [--print-db] [--help]\n"
+           "    --db FILE      平台数据库文件; 不传则按默认规则挑: 当前目录已有库 >\n"
+           "                   exe 目录已有库 > 工程根目录 charge_platform.db(会自动建库)\n"
+           "    --print-db     只打印将使用的数据库文件路径后退出(排查用)\n"
            "    --station ID   只模拟该电站下的电桩(默认不限电站)\n"
            "    --devices N    最多绑定电桩数, 默认 3 (上限 30)\n"
            "    --duration SEC 运行 SEC 秒后自动退出; 默认不限(可输入 exit 退出)\n"
@@ -58,6 +60,7 @@ int main(int argc, char *argv[])
 
     SimulatorOptions opt;
     QString dbArg;
+    bool printDbOnly = false;
 
     const QStringList args = app.arguments();
     for (int i = 1; i < args.size(); ++i) {
@@ -74,6 +77,8 @@ int main(int argc, char *argv[])
         } else if (a == QStringLiteral("--db")) {
             if (i + 1 >= args.size()) { printUsage(); return 2; }
             dbArg = args.at(++i);
+        } else if (a == QStringLiteral("--print-db")) {
+            printDbOnly = true;
         } else if (a == QStringLiteral("--station")) {
             qint64 v = 0;
             if (!readInt(v) || v <= 0) { printUsage(); return 2; }
@@ -89,12 +94,22 @@ int main(int argc, char *argv[])
         } else if (a == QStringLiteral("--auto")) {
             opt.autoMode = true;
         } else {
-            printUsage();
-            return 2;
+            // 宽松: 不认识的参数只警告, 不直接退出(兼容旧启动脚本)
+            QTextStream(stderr) << "[WARN] 忽略无法识别的参数: " << a
+                                << " (--help 查看用法)\n";
         }
     }
 
-    // --db 未指定时留空: DBManager::init 会用编译期固定的默认库(与平台同一个文件)。
+    // --print-db: 只打印将使用的数据库文件(不建库/不打开), 排查"连的哪个库"
+    if (printDbOnly) {
+        const QString path = dbArg.isEmpty() ? DBManager::resolveDefaultDbPath()
+                                             : QDir::cleanPath(dbArg);
+        QTextStream(stdout) << "[DB] 将使用的数据库文件: " << path << Qt::endl;
+        return 0;
+    }
+
+    // --db 未指定时留空: DBManager 按默认规则挑库(当前目录/exe 目录已存在的库优先,
+    // 都没有才用工程根目录), 保证与平台共用同一个库。
     opt.dbPath = dbArg;
 
     Simulator sim(opt);

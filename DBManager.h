@@ -187,6 +187,10 @@ public:
     bool init(const QString &dbFilePath = QString());
     bool isOpen() const;
     QString dbPath() const;
+    // 不传库文件时使用的默认库路径(只解析, 不建库/不打开)。
+    // 规则(兼容旧用法): ① 当前目录已有 charge_platform.db 用它 ② exe 目录已有用它
+    //                   ③ 都没有 -> 工程根目录(编译期 DEFAULT_DB_DIR)/exe 目录
+    static QString resolveDefaultDbPath();
     QSqlDatabase db() const;            // 当前线程专用连接
 
     // 事务控制(当前线程连接上)

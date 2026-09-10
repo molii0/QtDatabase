@@ -80,10 +80,11 @@ ChargerDeviceSimulator/
 
 1. 用 Qt Creator 打开 `ChargerSimulator.pro` 构建运行；或命令行 `qmake && mingw32-make`。
 2. 命令行参数：
-   - `--db FILE`：平台数据库文件；不传则用 **DBManager 默认库 = 工程根目录**
-     `charge_platform.db`（`.pro` 里 `DEFAULT_DB_DIR` 固定，平台与模拟器共用同一
-     个文件，WAL 支持两进程并发）；文件不存在会自动建库并写入演示数据
-     （5 站 × 6 桩 ≈ 30 台桩，正常量）
+   - `--db FILE`：平台数据库文件；不传则按默认规则挑：**当前目录已有库 > exe 目录
+     已有库 > 工程根目录** `charge_platform.db`（`.pro` 里 `DEFAULT_DB_DIR` 固定，
+     不存在会自动建库并写演示数据：5 站 × 6 桩 ≈ 30 台桩）。多进程共用时建议显式
+     `--db` 指向同一个文件（WAL 支持两进程并发）
+   - `--print-db`：只打印将使用的数据库文件路径后退出（排查“连的哪个库”）
    - `--station ID`：只模拟该电站下的电桩
    - `--devices N`：最多绑定电桩数（默认 3，上限 30）
    - `--duration SEC`：运行 N 秒后自动退出（自检/演示用）
@@ -91,7 +92,7 @@ ChargerDeviceSimulator/
    - `--help`：帮助
 
 ```bash
-# 例: 模拟 1 号电站的 4 台桩, 自动演示, 跑 60 秒(默认写工程根目录 charge_platform.db)
+# 例: 模拟 1 号电站的 4 台桩, 自动演示, 跑 60 秒(不传 --db 时按上面的默认规则挑库)
 ChargerSimulator.exe --station 1 --devices 4 --auto --duration 60
 
 # 也可显式指到平台库(位置任意, 例如放在别的目录的副本)

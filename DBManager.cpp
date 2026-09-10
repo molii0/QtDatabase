@@ -80,20 +80,38 @@ DBManager::DBManager() = default;
 
 DBManager::~DBManager() = default;
 
+// 默认库路径解析(只算路径, 不建库/不打开) —— 兼容旧用法:
+//   ① 当前目录已有 charge_platform.db        -> 用它(旧版在 exe 目录/工作目录跑的习惯)
+//   ② exe 目录已有 charge_platform.db        -> 用它
+//   ③ 两处都没有                             -> 工程根目录(编译期 DEFAULT_DB_DIR), 
+//                                              未定义宏则退回 exe 目录(不存在则建库)
+QString DBManager::resolveDefaultDbPath()
+{
+    const QString cwdDb = QDir(QDir::currentPath()).filePath(kDefaultDbName);
+    if (QFile::exists(cwdDb)) {
+        qDebug() << "默认库: 当前目录已有库, 直接使用 ->" << cwdDb;
+        return cwdDb;
+    }
+    const QString exeDb = QDir(QCoreApplication::applicationDirPath()).filePath(kDefaultDbName);
+    if (QFile::exists(exeDb)) {
+        qDebug() << "默认库: 程序目录已有库, 直接使用 ->" << exeDb;
+        return exeDb;
+    }
+#ifdef DEFAULT_DB_DIR
+    const QString rootDb = QDir(QString::fromLatin1(DEFAULT_DB_DIR)).filePath(kDefaultDbName);
+    qDebug() << "默认库: 以上都没有, 使用工程根目录(不存在会自动建库) ->" << rootDb;
+    return rootDb;
+#else
+    qDebug() << "默认库: 使用程序目录(不存在会自动建库) ->" << exeDb;
+    return exeDb;
+#endif
+}
+
 bool DBManager::init(const QString &dbFilePath)
 {
     QString path = dbFilePath;
-    if (path.isEmpty()) {
-        // 无参数时的默认库文件位置:
-        //   - 两个产品(平台 QtDatabase / 模拟器 ChargerSimulator)在各自的 .pro 里
-        //     都定义了 DEFAULT_DB_DIR = 工程根目录, 保证它们共用同一个 charge_platform.db;
-        //   - 未定义宏的编译目标(如 tests 自检)退回"exe 所在目录"。
-#ifdef DEFAULT_DB_DIR
-        path = QDir(QString::fromLatin1(DEFAULT_DB_DIR)).filePath(kDefaultDbName);
-#else
-        path = QDir(QCoreApplication::applicationDirPath()).filePath(kDefaultDbName);
-#endif
-    }
+    if (path.isEmpty())
+        path = resolveDefaultDbPath();
     m_dbPath = QDir::cleanPath(path);
 
     // 确保数据库所在目录存在
